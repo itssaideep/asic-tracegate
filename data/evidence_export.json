@@ -1,0 +1,38 @@
+{
+  "records": [
+    {
+      "id": "DS-18",
+      "kind": "design_spec",
+      "title": "Filter control design specification revision 4",
+      "requirement_revision": "r4",
+      "source_id": "REQ-104",
+      "relation": "documented_by"
+    },
+    {
+      "id": "RM-10",
+      "kind": "reference_model",
+      "title": "Filter control reference model revision 4",
+      "requirement_revision": "r4",
+      "source_id": "REQ-104",
+      "relation": "modeled_by"
+    },
+    {
+      "id": "VER-46",
+      "kind": "verification",
+      "title": "Filter regression run against current RTL",
+      "status": "PASS",
+      "rtl_commit": "1a2b3c",
+      "source_id": "RTL-1a2b3c",
+      "relation": "verified_by"
+    },
+    {
+      "id": "FPGA-34",
+      "kind": "fpga_build",
+      "title": "Integration FPGA build against current RTL",
+      "status": "PASS",
+      "rtl_commit": "1a2b3c",
+      "source_id": "RTL-1a2b3c",
+      "relation": "built_as"
+    }
+  ]
+}
