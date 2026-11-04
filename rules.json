@@ -1,0 +1,75 @@
+{
+  "schema_version": 1,
+  "requirement_kind": "requirement",
+  "required_relations": [
+    {"relation": "tracked_by", "kind": "work_item", "finding": "TRACE_LINK_MISSING"},
+    {"relation": "implemented_by", "kind": "rtl_change", "finding": "TRACE_LINK_MISSING"},
+    {"relation": "documented_by", "kind": "design_spec", "finding": "TRACE_LINK_MISSING"},
+    {"relation": "modeled_by", "kind": "reference_model", "finding": "TRACE_LINK_MISSING"}
+  ],
+  "revision_checks": [
+    {
+      "relation": "documented_by",
+      "kind": "design_spec",
+      "requirement_revision_field": "revision",
+      "evidence_revision_field": "requirement_revision",
+      "finding": "DOC_REVISION_STALE",
+      "message": "No linked design specification matches the current requirement revision."
+    },
+    {
+      "relation": "modeled_by",
+      "kind": "reference_model",
+      "requirement_revision_field": "revision",
+      "evidence_revision_field": "requirement_revision",
+      "finding": "MODEL_REVISION_STALE",
+      "message": "No linked reference model matches the current requirement revision."
+    }
+  ],
+  "evidence_checks": [
+    {
+      "source_relation": "implemented_by",
+      "source_kind": "rtl_change",
+      "relation": "verified_by",
+      "kind": "verification",
+      "status_field": "status",
+      "required_status": "PASS",
+      "source_revision_field": "commit",
+      "evidence_revision_field": "rtl_commit",
+      "mismatch_finding": "VERIFICATION_RTL_MISMATCH",
+      "missing_finding": "VERIFICATION_MISSING",
+      "mismatch_message": "Verification evidence does not match current RTL commit for {source_id}.",
+      "missing_message": "No passing verification evidence matches the current RTL commit."
+    },
+    {
+      "source_relation": "implemented_by",
+      "source_kind": "rtl_change",
+      "relation": "built_as",
+      "kind": "fpga_build",
+      "status_field": "status",
+      "required_status": "PASS",
+      "source_revision_field": "commit",
+      "evidence_revision_field": "rtl_commit",
+      "mismatch_finding": "FPGA_BUILD_RTL_MISMATCH",
+      "missing_finding": "FPGA_BUILD_MISSING",
+      "mismatch_message": "FPGA build does not match current RTL commit for {source_id}.",
+      "missing_message": "No passing FPGA build matches the current RTL commit."
+    }
+  ],
+  "claim_kind": "claim",
+  "claim_evidence_kinds": ["design_spec", "reference_model", "verification", "fpga_build"],
+  "claim_finding": "CLAIM_UNSUPPORTED",
+  "claim_message": "Claim has no linked current evidence of an accepted type.",
+  "blocking_findings": [
+    "TRACE_LINK_MISSING", "DOC_REVISION_STALE", "MODEL_REVISION_STALE",
+    "VERIFICATION_RTL_MISMATCH", "VERIFICATION_MISSING",
+    "FPGA_BUILD_RTL_MISMATCH", "FPGA_BUILD_MISSING",
+    "CLAIM_UNSUPPORTED", "BASELINE_ARTIFACT_MISSING"
+  ],
+  "baseline_kind": "release_baseline",
+  "baseline_relation": "includes",
+  "baseline_finding": "BASELINE_ARTIFACT_MISSING",
+  "baseline_artifact_kinds": [
+    "requirement", "work_item", "rtl_change", "design_spec",
+    "reference_model", "verification", "fpga_build"
+  ]
+}

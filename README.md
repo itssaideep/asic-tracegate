@@ -1,8 +1,8 @@
 # ASIC TraceGate
 
-ASIC TraceGate is a standalone command-line tool for checking whether an engineering release has the links and evidence it needs. It reads a JSON release manifest and checks traceability across requirements, work items, RTL changes, design documents, reference models, verification runs, FPGA builds, and release baselines.
+ASIC TraceGate is a standalone command-line tool for checking whether an engineering release has the links and evidence it needs. It reads a JSON release manifest and checks traceability across requirements, work items, RTL changes, design documents, reference models, verification runs, FPGA builds, and release baselines. Release checks are configurable in `rules.json`.
 
-The tool builds an auditable artifact graph and applies deterministic release rules. It reports missing links, outdated documents, verification or builds tied to an older RTL revision, incomplete baselines, and claims without current supporting evidence.
+The tool builds an auditable artifact graph and applies deterministic release rules. It reports missing links, outdated documents, verification or builds tied to an older RTL revision, incomplete baselines, and claims without current supporting evidence. Input formats are JSON and the command-line tool uses only the Python standard library.
 
 ## Run the example
 
@@ -18,31 +18,76 @@ Pass another JSON dataset with:
 python tracegate.py path\to\release.json
 ```
 
-The command prints a release quality report with a PASS or BLOCK decision, traceability coverage, evidence completeness, unsupported-claim rate, findings, and change-impact paths.
+To use a different rule set:
+
+```powershell
+python tracegate.py check path\to\release.json --rules path\to\rules.json
+```
+
+The command prints a release quality report with a PASS, WARN, or BLOCK decision, traceability coverage, evidence completeness, unsupported-claim rate, findings, and change-impact paths.
 
 ## What the example demonstrates
 
 - One synthetic feature requirement linked to a work item and implementation artifacts.
 - A stale design specification and verification record tied to an older RTL commit.
 - An FPGA build for the current RTL revision.
-- One evidence-supported claim and one unsupported claim.
+- One claim supported by current reference-model evidence and one unsupported claim.
 - A release baseline that omits one linked item.
+- A fictional Jira export that can be imported into the manifest.
 
 The example is deliberately imperfect so you can see the checks working. All artifact names and data are fictional.
 
 ## Design
 
-- `artifacts`: typed nodes with revisions and evidence metadata.
+- `schema_version`: manifest format version; the current format is version `1`.
+- `artifacts`: typed nodes with revisions and evidence metadata. Each needs a unique `id` and a `kind`; teams can add their own fields.
 - `edges`: explicit, directional relationships between artifacts.
 - `tracegate.py`: validates the manifest, traverses the graph, applies release rules, and prints the report.
+- `rules.json`: required artifact links, revision checks, evidence checks, baseline coverage, and which finding codes block a release.
+- `schemas/`: JSON Schema files for editor support and external validation.
+
+The built-in loader checks required fields, basic types, duplicate artifact IDs, and dangling edge references. It does not install or require a JSON Schema package. Keep `schema_version` at `1` when adding fields; make a deliberate format change before changing its value.
+
+## Adapt the release rules
+
+Before applying TraceGate to another team's workflow, map the team's artifact names and link directions to `rules.json`. For example, change `requirement_kind`, `required_relations`, revision-field names, evidence status values, and baseline artifact kinds to match the team's exports. Add a relation check only when that relationship is meaningful in the target workflow.
+
+`blocking_findings` controls the release gate. Codes in this list produce `BLOCK`; findings outside it produce `WARN`; no findings produce `PASS`. The sample makes every configured finding blocking. Set the list to the codes that must stop a release, and review the effect with representative manifests before adopting it.
+
+Manifests should use stable unique artifact IDs and explicit edges. Claims list supporting artifact IDs in `evidence_ids`; evidence is considered current only when it passes the configured revision/status checks. A missing or outdated item may therefore affect both the gate and the evidence-supported claim rate.
+
+## Import local exports
+
+Merge a Jira JSON export into a copy of the sample manifest. The importer reads the Jira export's issue key, summary, status, and requirement IDs (or `REQ-...` labels); it does not contact Jira:
+
+```powershell
+python tracegate.py import-jira data\jira_export.json --output data\release_with_jira.json
+```
+
+Import local Git commits. Commit messages or bodies containing a requirement ID such as `REQ-104` create requirement-to-change links:
+
+```powershell
+python tracegate.py import-git path\to\local\repository --output data\release_with_git.json
+```
+
+If the commit messages do not include requirement IDs, provide the link explicitly:
+
+```powershell
+python tracegate.py import-git path\to\local\repository --requirement-id REQ-104 --output data\release_with_git.json
+```
+
+Normalized exports from other tools can be merged when they contain `artifacts` and `edges` arrays; they do not need a release name:
+
+```powershell
+python tracegate.py import-artifacts path\to\evidence_export.json --output data\release_with_evidence.json
+```
 
 ## Current limitations
 
-This is a standalone JSON-based tool with one sample manifest. It does not connect directly to Jira, source control, RTL tools, documentation platforms, FPGA build systems, or an LLM. Review and adapt the manifest schema and release rules before using them in another team's workflow.
+Jira import currently reads exported JSON files; Git import reads local history through the installed Git command. The tool does not connect directly to Jira, source-control hosting, RTL tools, documentation platforms, FPGA build systems, or an LLM. It does not authenticate, fetch data, or verify that imported records are genuine. The sample manifest and Jira export are fictional. Review and adapt the schema, field mappings, relationship rules, status values, revision semantics, and blocking findings before using it in another team's workflow.
 
 ## Next improvements
 
-1. Add importers for Jira exports and Git history.
-2. Add a JSON or HTML report export.
-3. Add configurable release rules and required artifact types.
-4. Add a small browser interface for exploring the impact graph.
+1. Add JSON or HTML report export.
+2. Add adapters for additional documentation, verification, and build exports.
+3. Add a small browser interface for exploring the impact graph.
