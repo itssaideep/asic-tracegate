@@ -1,0 +1,35 @@
+{
+  "release": "synthetic-filter-control-v1.4",
+  "artifacts": [
+    {"id": "REQ-104", "kind": "requirement", "title": "Add programmable packet filter", "revision": "r4"},
+    {"id": "JIRA-882", "kind": "work_item", "title": "Implement filter-control registers", "status": "Done"},
+    {"id": "RTL-1a2b3c", "kind": "rtl_change", "title": "Filter control RTL", "commit": "1a2b3c"},
+    {"id": "DS-17", "kind": "design_spec", "title": "Filter control design specification", "requirement_revision": "r3"},
+    {"id": "RM-09", "kind": "reference_model", "title": "Filter control reference model", "requirement_revision": "r4"},
+    {"id": "VER-45", "kind": "verification", "title": "Filter regression run", "status": "PASS", "rtl_commit": "0f9e8d"},
+    {"id": "FPGA-33", "kind": "fpga_build", "title": "Integration FPGA build", "status": "PASS", "rtl_commit": "1a2b3c"},
+    {"id": "BASELINE-14", "kind": "release_baseline", "title": "Candidate release baseline"},
+    {"id": "CLAIM-01", "kind": "claim", "title": "The filter control logic passed regression", "evidence_ids": ["VER-45"]},
+    {"id": "CLAIM-02", "kind": "claim", "title": "The feature is fully documented for release", "evidence_ids": ["REQ-104"]}
+  ],
+  "edges": [
+    {"from": "REQ-104", "to": "JIRA-882", "type": "tracked_by"},
+    {"from": "REQ-104", "to": "RTL-1a2b3c", "type": "implemented_by"},
+    {"from": "REQ-104", "to": "DS-17", "type": "documented_by"},
+    {"from": "REQ-104", "to": "RM-09", "type": "modeled_by"},
+    {"from": "RTL-1a2b3c", "to": "VER-45", "type": "verified_by"},
+    {"from": "RTL-1a2b3c", "to": "FPGA-33", "type": "built_as"},
+    {"from": "BASELINE-14", "to": "REQ-104", "type": "includes"},
+    {"from": "BASELINE-14", "to": "RTL-1a2b3c", "type": "includes"},
+    {"from": "BASELINE-14", "to": "DS-17", "type": "includes"},
+    {"from": "BASELINE-14", "to": "RM-09", "type": "includes"},
+    {"from": "BASELINE-14", "to": "VER-45", "type": "includes"},
+    {"from": "BASELINE-14", "to": "FPGA-33", "type": "includes"}
+  ],
+  "expected_warning_codes": [
+    "BASELINE_ARTIFACT_MISSING",
+    "DOC_REVISION_STALE",
+    "VERIFICATION_RTL_MISMATCH",
+    "CLAIM_UNSUPPORTED"
+  ]
+}
