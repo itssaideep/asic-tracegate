@@ -1,122 +1,117 @@
 # ASIC TraceGate
 
-ASIC TraceGate is a standalone command-line tool for checking whether an engineering release has the links and evidence it needs. It reads a JSON release manifest and checks traceability across requirements, work items, RTL changes, design documents, reference models, verification runs, FPGA builds, and release baselines. Release checks are configurable in `rules.json`.
+ASIC TraceGate is a dependency-free command-line tool for checking release traceability and evidence. It reads a JSON manifest, builds an artifact graph, applies configurable rules, and reports missing links, stale evidence, unsupported claims, release-baseline gaps, and downstream change impact.
 
-The tool builds an auditable artifact graph and applies deterministic release rules. It reports missing links, outdated documents, verification or builds tied to an older RTL revision, incomplete baselines, and claims without current supporting evidence. Input formats are JSON and the command-line tool uses only the Python standard library.
+It works with local files and local Git history. It does not connect to Jira, source-control hosting, RTL or FPGA tools, documentation systems, or an LLM.
 
-## Run the example
+## Quick start
 
-Requires Python 3.10 or newer. No third-party packages are required.
+Requires Python 3.10 or newer. No third-party packages are needed.
 
 ```powershell
 python tracegate.py
 ```
 
-Pass another JSON dataset with:
+The sample intentionally reports `BLOCK`: it contains a stale design specification, stale verification, an incomplete baseline, and one unsupported claim. This gives the checks something to report.
 
-```powershell
-python tracegate.py path\to\release.json
-```
-
-To use a different rule set:
+Check a different manifest or rules file:
 
 ```powershell
 python tracegate.py check path\to\release.json --rules path\to\rules.json
 ```
 
-The command prints a release quality report with a PASS, WARN, or BLOCK decision, traceability coverage, evidence completeness, unsupported-claim rate, findings, and change-impact paths. Export it as JSON or standalone HTML:
+## Reports and release gates
+
+The text report is the default. Write a machine-readable JSON report or a self-contained HTML report with:
 
 ```powershell
 python tracegate.py check --format json --output output\report.json
 python tracegate.py check --format html --output output\report.html
 ```
 
-Use `--fail-on-block` to return exit code `1` when the gate is BLOCK, or `--fail-on-warn` to fail on either WARN or BLOCK. `--severity block` and `--severity warn` filter displayed findings while retaining the overall gate counts:
+Findings are labeled `BLOCK` or `WARN` according to `blocking_findings` in the rules file. Filter the displayed findings without changing the overall gate or counts:
 
 ```powershell
-python tracegate.py check --fail-on-block --severity block
+python tracegate.py check --severity block
+python tracegate.py check --severity warn
 ```
 
-## What the example demonstrates
+For scripts and CI, `--fail-on-block` returns exit code 1 for a blocked release. `--fail-on-warn` returns 1 for either a warning or a block. Without either option, the command writes the report and exits successfully unless it cannot read or process its inputs.
 
-- One synthetic feature requirement linked to a work item and implementation artifacts.
-- A stale design specification and verification record tied to an older RTL commit.
-- An FPGA build for the current RTL revision.
-- One claim supported by current reference-model evidence and one unsupported claim.
-- A release baseline that omits one linked item.
-- A fictional Jira export that can be imported into the manifest.
+## Importing artifacts
 
-The example is deliberately imperfect so you can see the checks working. All artifact names and data are fictional.
+All import commands merge local data into a copy of the sample manifest. Choose a new output path to preserve the original.
 
-## Design
+### Jira JSON export
 
-- `schema_version`: manifest format version; the current format is version `1`.
-- `artifacts`: typed nodes with revisions and evidence metadata. Each needs a unique `id` and a `kind`; teams can add their own fields.
-- `edges`: explicit, directional relationships between artifacts.
-- `tracegate.py`: validates the manifest, traverses the graph, applies release rules, and prints the report.
-- `rules.json`: required artifact links, revision checks, evidence checks, baseline coverage, and which finding codes block a release.
-- `schemas/`: JSON Schema files for manifests, rules, and normalized evidence exports.
-- `viewer.html`: a local browser interface for browsing the downstream artifact graph of each requirement.
-- `import-csv-evidence`: a field-mapped CSV adapter for document, model, verification, and build exports.
-
-The built-in loader checks required fields, basic types, duplicate artifact IDs, and dangling edge references. It does not install or require a JSON Schema package. Keep `schema_version` at `1` when adding fields; make a deliberate format change before changing its value.
-
-## Adapt the release rules
-
-Before applying TraceGate to another team's workflow, map the team's artifact names and link directions to `rules.json`. For example, change `requirement_kind`, `required_relations`, revision-field names, evidence status values, and baseline artifact kinds to match the team's exports. Add a relation check only when that relationship is meaningful in the target workflow.
-
-`blocking_findings` controls the release gate. Codes in this list produce `BLOCK`; findings outside it produce `WARN`; no findings produce `PASS`. The sample makes every configured finding blocking. Set the list to the codes that must stop a release, and review the effect with representative manifests before adopting it.
-
-Manifests should use stable unique artifact IDs and explicit edges. Claims list supporting artifact IDs in `evidence_ids`; evidence is considered current only when it passes the configured revision/status checks. A missing or outdated item may therefore affect both the gate and the evidence-supported claim rate.
-
-## Import local exports
-
-Merge a Jira JSON export into a copy of the sample manifest. The importer reads the Jira export's issue key, summary, status, and requirement IDs (or `REQ-...` labels); it does not contact Jira:
+The importer reads issue keys, summaries, statuses, and requirement IDs from `requirement_ids` or `REQ-...` labels. It does not call Jira.
 
 ```powershell
 python tracegate.py import-jira data\jira_export.json --output data\release_with_jira.json
 ```
 
-Import local Git commits. Commit messages or bodies containing a requirement ID such as `REQ-104` create requirement-to-change links:
+### Local Git history
+
+Commit subjects or bodies containing a requirement ID such as `REQ-104` create requirement-to-change links. If they do not include IDs, link the imported commits to a requirement explicitly.
 
 ```powershell
 python tracegate.py import-git path\to\local\repository --output data\release_with_git.json
-```
-
-If the commit messages do not include requirement IDs, provide the link explicitly:
-
-```powershell
 python tracegate.py import-git path\to\local\repository --requirement-id REQ-104 --output data\release_with_git.json
 ```
 
-Normalized exports from other tools can be merged when they contain `artifacts` and `edges` arrays; they do not need a release name:
+Git history is read locally with the installed `git` command; no remote repository is fetched.
+
+### Normalized JSON artifacts
+
+Merge an export that already contains `artifacts` and `edges` arrays:
 
 ```powershell
-python tracegate.py import-artifacts path\to\evidence_export.json --output data\release_with_evidence.json
+python tracegate.py import-artifacts path\to\export.json --output data\release_with_artifacts.json
 ```
 
-For documentation, reference-model, verification, or FPGA build exports, use the normalized record adapter:
+The export does not need a release name. Artifact IDs referenced by edges must exist in the merged manifest.
+
+### Document, model, verification, and build evidence
+
+Use the normalized evidence adapter for records with `id`, `kind`, `source_id`, and `relation` fields:
 
 ```powershell
 python tracegate.py import-evidence data\evidence_export.json --output data\release_with_evidence.json
 ```
 
-Each record needs `id`, `kind`, `source_id`, and `relation`. Supported link pairs are `design_spec` from a `requirement` via `documented_by`, `reference_model` from a `requirement` via `modeled_by`, `verification` from an `rtl_change` via `verified_by`, and `fpga_build` from an `rtl_change` via `built_as`. Other fields on a record, such as `status`, `rtl_commit`, and `requirement_revision`, are preserved. Adapt source exports into this format and check `schemas/evidence-export.schema.json`.
+Supported links are:
 
-Flat CSV exports can be mapped without first converting them to JSON. The kind selects the expected relationship; provide the export's ID/source columns and a JSON map from TraceGate artifact fields to CSV header names:
+- `design_spec` from a `requirement` using `documented_by`
+- `reference_model` from a `requirement` using `modeled_by`
+- `verification` from an `rtl_change` using `verified_by`
+- `fpga_build` from an `rtl_change` using `built_as`
+
+Other record fields, including `status`, `rtl_commit`, and `requirement_revision`, are kept. See [`schemas/evidence-export.schema.json`](schemas/evidence-export.schema.json) and the fictional example at [`data/evidence_export.json`](data/evidence_export.json).
+
+### Flat CSV evidence
+
+Map CSV headers to TraceGate artifact fields with a JSON field-map file. The evidence kind determines the valid source kind and relationship.
 
 ```powershell
 python tracegate.py import-csv-evidence data\verification_export.csv --kind verification --id-column run_id --source-id-column rtl_id --field-map data\verification_field_map.json --output data\release_with_csv.json
 ```
 
-The included field map maps `rtl_revision` to `rtl_commit`, `result` to `status`, and `summary` to `title`. The same adapter supports `design_spec`, `reference_model`, and `fpga_build` records. It validates that the source artifact and relationship match the chosen kind.
+The included map converts `rtl_revision`, `result`, and `summary` to `rtl_commit`, `status`, and `title`. The adapter also accepts `design_spec`, `reference_model`, and `fpga_build` kinds. It rejects missing ID/source columns and invalid kind-to-relationship combinations.
 
-Open `viewer.html` in a browser and load a manifest such as `data/release_candidate.json`. Select a requirement to see all downstream artifacts and links. The viewer reads the chosen file locally in the browser.
+## Explore the impact graph
 
-## Current limitations
+Open [`viewer.html`](viewer.html) in a browser, load a manifest such as [`data/release_candidate.json`](data/release_candidate.json), and select a requirement. The viewer shows its reachable artifacts and relationships; selecting a node displays its manifest fields. The manifest is read locally in the browser.
 
-Jira import currently reads exported JSON files; Git import reads local history through the installed Git command. The tool does not connect directly to Jira, source-control hosting, RTL tools, documentation platforms, FPGA build systems, or an LLM. It does not authenticate, fetch data, or verify that imported records are genuine. The sample manifest and Jira export are fictional. Review and adapt the schema, field mappings, relationship rules, status values, revision semantics, and blocking findings before using it in another team's workflow.
+## Manifest and rule files
 
-## Scope
+- `data/release_candidate.json` is the sample release manifest. Its `schema_version` is `1`; artifacts have unique IDs and kinds, and edges define directed links.
+- `rules.json` defines required relationships, revision checks, evidence checks, baseline coverage, and which finding codes block release.
+- `schemas/` contains JSON Schemas for manifests, rules, and normalized evidence records.
 
-The report exporter, JSON and CSV evidence adapters, and local graph viewer are included. Vendor-specific APIs and export formats still need explicit field mapping; TraceGate does not fetch or authenticate to those systems.
+The built-in loader checks required fields, basic types, duplicate artifact IDs, and dangling edge references. It does not run a full JSON Schema validator or require a JSON Schema package.
+
+Before using TraceGate with another team's data, map that team's artifact kinds, edge directions, field names, status values, and revision semantics into the rules and import mappings. `blocking_findings` codes produce `BLOCK`; other findings produce `WARN`; no findings produce `PASS`. If `blocking_findings` is omitted, all findings block by default.
+
+## Limitations
+
+The sample manifest and exports are fictional. Importers read local JSON, CSV, or Git history and do not authenticate, fetch data, or confirm that records are genuine. Vendor-specific export formats need field mapping before import. Review the schemas, rules, and mappings before applying the gate to another team's workflow.
