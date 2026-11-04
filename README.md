@@ -24,7 +24,14 @@ To use a different rule set:
 python tracegate.py check path\to\release.json --rules path\to\rules.json
 ```
 
-The command prints a release quality report with a PASS, WARN, or BLOCK decision, traceability coverage, evidence completeness, unsupported-claim rate, findings, and change-impact paths.
+The command prints a release quality report with a PASS, WARN, or BLOCK decision, traceability coverage, evidence completeness, unsupported-claim rate, findings, and change-impact paths. Export it as JSON or standalone HTML:
+
+```powershell
+python tracegate.py check --format json --output output\report.json
+python tracegate.py check --format html --output output\report.html
+```
+
+Use `--fail-on-block` to return exit code `1` when the gate is BLOCK, for example in a local script or CI job.
 
 ## What the example demonstrates
 
@@ -44,7 +51,8 @@ The example is deliberately imperfect so you can see the checks working. All art
 - `edges`: explicit, directional relationships between artifacts.
 - `tracegate.py`: validates the manifest, traverses the graph, applies release rules, and prints the report.
 - `rules.json`: required artifact links, revision checks, evidence checks, baseline coverage, and which finding codes block a release.
-- `schemas/`: JSON Schema files for editor support and external validation.
+- `schemas/`: JSON Schema files for manifests, rules, and normalized evidence exports.
+- `viewer.html`: a local browser interface for browsing the downstream artifact graph of each requirement.
 
 The built-in loader checks required fields, basic types, duplicate artifact IDs, and dangling edge references. It does not install or require a JSON Schema package. Keep `schema_version` at `1` when adding fields; make a deliberate format change before changing its value.
 
@@ -82,12 +90,20 @@ Normalized exports from other tools can be merged when they contain `artifacts` 
 python tracegate.py import-artifacts path\to\evidence_export.json --output data\release_with_evidence.json
 ```
 
+For documentation, reference-model, verification, or FPGA build exports, use the normalized record adapter:
+
+```powershell
+python tracegate.py import-evidence data\evidence_export.json --output data\release_with_evidence.json
+```
+
+Each record needs `id`, `kind`, `source_id`, and `relation`. Supported link pairs are `design_spec` from a `requirement` via `documented_by`, `reference_model` from a `requirement` via `modeled_by`, `verification` from an `rtl_change` via `verified_by`, and `fpga_build` from an `rtl_change` via `built_as`. Other fields on a record, such as `status`, `rtl_commit`, and `requirement_revision`, are preserved. Adapt source exports into this format and check `schemas/evidence-export.schema.json`.
+
+Open `viewer.html` in a browser and load a manifest such as `data/release_candidate.json`. Select a requirement to see all downstream artifacts and links. The viewer reads the chosen file locally in the browser.
+
 ## Current limitations
 
 Jira import currently reads exported JSON files; Git import reads local history through the installed Git command. The tool does not connect directly to Jira, source-control hosting, RTL tools, documentation platforms, FPGA build systems, or an LLM. It does not authenticate, fetch data, or verify that imported records are genuine. The sample manifest and Jira export are fictional. Review and adapt the schema, field mappings, relationship rules, status values, revision semantics, and blocking findings before using it in another team's workflow.
 
-## Next improvements
+## Scope
 
-1. Add JSON or HTML report export.
-2. Add adapters for additional documentation, verification, and build exports.
-3. Add a small browser interface for exploring the impact graph.
+The report exporter, normalized evidence adapter, and local graph viewer are included. Vendor-specific APIs and export formats still need explicit field mapping; TraceGate does not fetch or authenticate to those systems.

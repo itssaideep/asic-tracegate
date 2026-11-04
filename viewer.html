@@ -1,0 +1,194 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>ASIC TraceGate — Impact Explorer</title>
+  <style>
+    :root { color-scheme: light dark; font: 16px/1.45 system-ui, sans-serif; }
+    body { max-width: 1300px; margin: 0 auto; padding: 1.5rem; }
+    h1 { margin-bottom: .25rem; }
+    .muted { color: GrayText; }
+    .controls { display: flex; flex-wrap: wrap; gap: .8rem; align-items: end; margin: 1.2rem 0; }
+    label { display: grid; gap: .3rem; font-weight: 600; }
+    input, select, button { font: inherit; padding: .55rem .7rem; }
+    .layout { display: grid; grid-template-columns: minmax(0, 2fr) minmax(250px, 1fr); gap: 1rem; }
+    .panel { border: 1px solid GrayText; border-radius: 12px; padding: 1rem; min-width: 0; }
+    .graph-scroll { overflow: auto; min-height: 420px; }
+    svg { display: block; }
+    .edge { stroke: #87909c; stroke-width: 2; fill: none; marker-end: url(#arrow); }
+    .node rect { fill: Canvas; stroke: #738096; stroke-width: 2; rx: 10; }
+    .node.selected rect { stroke: #3478d4; stroke-width: 4; }
+    .node text { fill: CanvasText; font-size: 13px; pointer-events: none; }
+    .node { cursor: pointer; }
+    .edge-label { fill: GrayText; font-size: 11px; }
+    pre { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 65vh; overflow: auto; }
+    #status { margin: .8rem 0; }
+    @media (max-width: 800px) { .layout { grid-template-columns: 1fr; } body { padding: .8rem; } }
+  </style>
+</head>
+<body>
+  <h1>ASIC TraceGate Impact Explorer</h1>
+  <p class="muted">Load a release manifest to explore the artifacts connected to a requirement. The file stays in your browser.</p>
+  <div class="controls">
+    <label>Release manifest <input id="manifestFile" type="file" accept="application/json,.json"></label>
+    <label>Requirement <select id="requirement" disabled><option>Load a manifest first</option></select></label>
+    <label>Highlight artifacts <input id="search" type="search" placeholder="Filter by ID, kind, or title" disabled></label>
+  </div>
+  <div id="status" role="status" class="muted">Choose data/release_candidate.json to get started.</div>
+  <div class="layout">
+    <section class="panel" aria-label="Requirement impact graph">
+      <div class="graph-scroll"><svg id="graph" role="img" aria-label="Dependency graph"></svg></div>
+    </section>
+    <aside class="panel">
+      <h2>Artifact details</h2>
+      <p id="detailHint" class="muted">Select a node in the graph to inspect its manifest fields.</p>
+      <pre id="details"></pre>
+    </aside>
+  </div>
+  <script>
+    (() => {
+      const ns = "http://www.w3.org/2000/svg";
+      const fileInput = document.querySelector("#manifestFile");
+      const requirementSelect = document.querySelector("#requirement");
+      const searchInput = document.querySelector("#search");
+      const graph = document.querySelector("#graph");
+      const status = document.querySelector("#status");
+      const details = document.querySelector("#details");
+      const detailHint = document.querySelector("#detailHint");
+      let manifest = null;
+      let selectedArtifact = null;
+
+      function svgElement(tag, attrs = {}) {
+        const element = document.createElementNS(ns, tag);
+        Object.entries(attrs).forEach(([key, value]) => element.setAttribute(key, value));
+        return element;
+      }
+
+      function showDetails(id) {
+        const artifact = manifest.artifacts.find((item) => item.id === id);
+        if (!artifact) return;
+        selectedArtifact = id;
+        detailHint.textContent = `${artifact.id} · ${artifact.kind}`;
+        details.textContent = JSON.stringify(artifact, null, 2);
+        graph.querySelectorAll(".node").forEach((node) => {
+          node.classList.toggle("selected", node.dataset.id === id);
+        });
+      }
+
+      function render() {
+        if (!manifest) return;
+        const rootId = requirementSelect.value;
+        const byId = new Map(manifest.artifacts.map((item) => [item.id, item]));
+        const adjacency = new Map();
+        manifest.edges.forEach((edge) => {
+          if (!adjacency.has(edge.from)) adjacency.set(edge.from, []);
+          adjacency.get(edge.from).push(edge);
+        });
+
+        const depth = new Map([[rootId, 0]]);
+        const queue = [rootId];
+        for (let cursor = 0; cursor < queue.length; cursor += 1) {
+          const sourceId = queue[cursor];
+          (adjacency.get(sourceId) || []).forEach((edge) => {
+            if (byId.has(edge.to) && !depth.has(edge.to)) {
+              depth.set(edge.to, depth.get(sourceId) + 1);
+              queue.push(edge.to);
+            }
+          });
+        }
+
+        const maxDepth = Math.max(0, ...depth.values());
+        const columns = Array.from({ length: maxDepth + 1 }, () => []);
+        depth.forEach((level, id) => columns[level].push(id));
+        columns.forEach((items) => items.sort());
+        const maxRows = Math.max(1, ...columns.map((items) => items.length));
+        const width = Math.max(470, 55 + (maxDepth + 1) * 260);
+        const height = Math.max(430, 60 + maxRows * 105);
+        graph.replaceChildren();
+        graph.setAttribute("viewBox", `0 0 ${width} ${height}`);
+        graph.setAttribute("width", width);
+        graph.setAttribute("height", height);
+
+        const defs = svgElement("defs");
+        const marker = svgElement("marker", { id: "arrow", markerWidth: 10, markerHeight: 8, refX: 9, refY: 4, orient: "auto" });
+        marker.append(svgElement("path", { d: "M0,0 L10,4 L0,8 z", fill: "#87909c" }));
+        defs.append(marker);
+        graph.append(defs);
+
+        const positions = new Map();
+        columns.forEach((ids, level) => ids.forEach((id, row) => {
+          positions.set(id, { x: 30 + level * 260, y: 35 + row * 105 });
+        }));
+
+        manifest.edges.filter((edge) => positions.has(edge.from) && positions.has(edge.to)).forEach((edge) => {
+          const from = positions.get(edge.from);
+          const to = positions.get(edge.to);
+          const x1 = from.x + 190;
+          const y1 = from.y + 32;
+          const x2 = to.x;
+          const y2 = to.y + 32;
+          graph.append(svgElement("path", { class: "edge", d: `M ${x1} ${y1} C ${x1 + 35} ${y1}, ${x2 - 35} ${y2}, ${x2} ${y2}` }));
+          const label = svgElement("text", { class: "edge-label", x: (x1 + x2) / 2 - 25, y: (y1 + y2) / 2 - 5 });
+          label.textContent = edge.type;
+          graph.append(label);
+        });
+
+        const query = searchInput.value.trim().toLowerCase();
+        depth.forEach((_level, id) => {
+          const artifact = byId.get(id);
+          const pos = positions.get(id);
+          const group = svgElement("g", { class: "node", tabindex: "0", role: "button", "aria-label": `${artifact.id}: ${artifact.title || artifact.kind}`, "data-id": id });
+          const matched = !query || [artifact.id, artifact.kind, artifact.title || ""].some((value) => value.toLowerCase().includes(query));
+          group.setAttribute("opacity", matched ? "1" : ".25");
+          group.append(svgElement("rect", { x: pos.x, y: pos.y, width: 190, height: 64 }));
+          const idText = svgElement("text", { x: pos.x + 10, y: pos.y + 22, "font-weight": "700" });
+          idText.textContent = artifact.id;
+          const titleText = svgElement("text", { x: pos.x + 10, y: pos.y + 44 });
+          const title = artifact.title || artifact.kind;
+          titleText.textContent = title.length > 23 ? `${title.slice(0, 20)}…` : title;
+          const titleNode = svgElement("title");
+          titleNode.textContent = `${artifact.kind}: ${title}`;
+          group.append(idText, titleText, titleNode);
+          group.addEventListener("click", () => showDetails(id));
+          group.addEventListener("keydown", (event) => {
+            if (event.key === "Enter" || event.key === " ") { event.preventDefault(); showDetails(id); }
+          });
+          graph.append(group);
+        });
+        showDetails(selectedArtifact && depth.has(selectedArtifact) ? selectedArtifact : rootId);
+        status.textContent = `${depth.size} connected artifacts · ${Math.max(0, depth.size - 1)} downstream from ${rootId}`;
+      }
+
+      fileInput.addEventListener("change", async () => {
+        const file = fileInput.files && fileInput.files[0];
+        if (!file) return;
+        try {
+          const parsed = JSON.parse(await file.text());
+          if (!Array.isArray(parsed.artifacts) || !Array.isArray(parsed.edges)) throw new Error("Expected artifacts and edges arrays.");
+          manifest = parsed;
+          const requirements = manifest.artifacts.filter((item) => item.kind === "requirement");
+          requirementSelect.replaceChildren();
+          requirements.forEach((item) => {
+            const option = document.createElement("option");
+            option.value = item.id;
+            option.textContent = `${item.id} — ${item.title || "Requirement"}`;
+            requirementSelect.append(option);
+          });
+          requirementSelect.disabled = requirements.length === 0;
+          searchInput.disabled = requirements.length === 0;
+          if (!requirements.length) throw new Error("No artifacts with kind 'requirement' were found.");
+          status.textContent = `Loaded ${manifest.artifacts.length} artifacts and ${manifest.edges.length} links from ${file.name}.`;
+          render();
+        } catch (error) {
+          manifest = null;
+          graph.replaceChildren();
+          status.textContent = `Could not load manifest: ${error.message}`;
+        }
+      });
+      requirementSelect.addEventListener("change", render);
+      searchInput.addEventListener("input", render);
+    })();
+  </script>
+</body>
+</html>

@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import html
 import json
 import re
 import subprocess
@@ -285,6 +286,41 @@ def render_report(report: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+def render_html_report(report: dict[str, Any]) -> str:
+    findings = "".join(
+        "<tr><td>{}</td><td>{}</td><td>{}</td></tr>".format(
+            html.escape(item["code"]), html.escape(item["artifact_id"]), html.escape(item["message"])
+        )
+        for item in report["findings"]
+    ) or '<tr><td colspan="3">No findings</td></tr>'
+    impact = "".join(
+        "<li><strong>{}</strong> → {}</li>".format(
+            html.escape(req_id), html.escape(", ".join(ids) if ids else "No linked artifacts")
+        )
+        for req_id, ids in report["change_impact"].items()
+    ) or "<li>No requirements in this manifest</li>"
+    gate_class = report["gate"].lower()
+    return f"""<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>TraceGate report — {html.escape(report['release'])}</title>
+<style>
+:root{{color-scheme:light dark;font:16px/1.5 system-ui,sans-serif;--line:#87909c;--panel:color-mix(in srgb,Canvas 92%,#64748b 8%)}}
+body{{max-width:1100px;margin:2rem auto;padding:0 1rem}}h1,h2{{line-height:1.2}}.metrics{{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:.8rem;margin:1.5rem 0}}
+.card{{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:1rem}}.value{{font-size:1.5rem;font-weight:700}}.gate{{font-weight:800}}.block{{color:#d43b3b}}.warn{{color:#b87900}}.pass{{color:#21834a}}
+table{{width:100%;border-collapse:collapse}}th,td{{padding:.65rem;text-align:left;border-bottom:1px solid var(--line);vertical-align:top}}code{{overflow-wrap:anywhere}}li{{margin:.3rem 0}}
+</style></head><body>
+<h1>TraceGate report</h1><p>Release: <strong>{html.escape(report['release'])}</strong></p>
+<div class="metrics">
+<div class="card"><div>Release gate</div><div class="value gate {gate_class}">{html.escape(report['gate'])}</div><div>{report['blocking_finding_count']} blocking findings</div></div>
+<div class="card"><div>Traceability coverage</div><div class="value">{report['traceability_coverage']:.0%}</div><div>{report['traceability_links_present']} / {report['traceability_links_expected']} links</div></div>
+<div class="card"><div>Evidence completeness</div><div class="value">{report['evidence_completeness']:.0%}</div><div>{report['evidence_items_current']} / {report['evidence_items_expected']} checks</div></div>
+<div class="card"><div>Unsupported claims</div><div class="value">{report['unsupported_claim_rate']:.0%}</div><div>{len(report['unsupported_claims'])} unsupported</div></div>
+</div>
+<h2>Findings</h2><table><thead><tr><th>Code</th><th>Artifact</th><th>Details</th></tr></thead><tbody>{findings}</tbody></table>
+<h2>Change impact</h2><ul>{impact}</ul>
+</body></html>"""
+
+
 def merge_imports(manifest: dict[str, Any], incoming_artifacts: list[dict[str, Any]],
                   incoming_edges: list[dict[str, str]]) -> dict[str, Any]:
     merged = dict(manifest)
@@ -396,6 +432,47 @@ def import_git_history(manifest: dict[str, Any], repo_path: Path,
     return merge_imports(manifest, artifacts, edges), len(artifacts), len(edges)
 
 
+EVIDENCE_LINKS = {
+    "design_spec": ("requirement", "documented_by"),
+    "reference_model": ("requirement", "modeled_by"),
+    "verification": ("rtl_change", "verified_by"),
+    "fpga_build": ("rtl_change", "built_as"),
+}
+
+
+def import_evidence_export(manifest: dict[str, Any], export: Any) -> tuple[dict[str, Any], int, int]:
+    records = export.get("records") if isinstance(export, dict) else None
+    if not isinstance(records, list):
+        raise DatasetError("evidence export must contain a records array")
+    known = {item["id"]: item for item in manifest["artifacts"]}
+    artifacts: list[dict[str, Any]] = []
+    edges: list[dict[str, str]] = []
+    for index, record in enumerate(records):
+        if not isinstance(record, dict):
+            raise DatasetError(f"records[{index}] must be an object")
+        artifact_id, kind = record.get("id"), record.get("kind")
+        source_id, relation = record.get("source_id"), record.get("relation")
+        if not all(isinstance(value, str) and value.strip()
+                   for value in (artifact_id, kind, source_id, relation)):
+            raise DatasetError(f"records[{index}] needs non-empty id, kind, source_id, and relation strings")
+        if kind not in EVIDENCE_LINKS:
+            raise DatasetError(f"records[{index}] has unsupported evidence kind {kind!r}")
+        expected_source_kind, expected_relation = EVIDENCE_LINKS[kind]
+        source = known.get(source_id)
+        if source is None:
+            raise DatasetError(f"records[{index}] refers to unknown source artifact {source_id!r}")
+        if source.get("kind") != expected_source_kind or relation != expected_relation:
+            raise DatasetError(
+                f"{kind} records must link from {expected_source_kind} using {expected_relation}"
+            )
+        artifact = {key: value for key, value in record.items()
+                    if key not in {"source_id", "relation"}}
+        artifacts.append(artifact)
+        edges.append({"from": source_id, "to": artifact_id, "type": relation})
+        known[artifact_id] = artifact
+    return merge_imports(manifest, artifacts, edges), len(artifacts), len(edges)
+
+
 def write_dataset(path: Path, data: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
@@ -408,6 +485,9 @@ def make_parser() -> argparse.ArgumentParser:
     check = commands.add_parser("check", help="evaluate a release manifest")
     check.add_argument("manifest", nargs="?", type=Path, default=DEFAULT_MANIFEST)
     check.add_argument("--rules", type=Path, default=DEFAULT_RULES)
+    check.add_argument("--format", choices=("text", "json", "html"), default="text")
+    check.add_argument("--output", type=Path, help="write the report to this file instead of standard output")
+    check.add_argument("--fail-on-block", action="store_true", help="exit with status 1 when the gate is BLOCK")
 
     jira = commands.add_parser("import-jira", help="merge a Jira JSON export into a manifest")
     jira.add_argument("export", type=Path)
@@ -427,6 +507,13 @@ def make_parser() -> argparse.ArgumentParser:
     artifacts.add_argument("export", type=Path)
     artifacts.add_argument("--manifest", type=Path, default=DEFAULT_MANIFEST)
     artifacts.add_argument("--output", type=Path, default=DEFAULT_OUTPUT)
+
+    evidence = commands.add_parser(
+        "import-evidence", help="import document, model, verification, or FPGA build records"
+    )
+    evidence.add_argument("export", type=Path)
+    evidence.add_argument("--manifest", type=Path, default=DEFAULT_MANIFEST)
+    evidence.add_argument("--output", type=Path, default=DEFAULT_OUTPUT)
     return parser
 
 
@@ -434,14 +521,24 @@ def main(argv: list[str] | None = None) -> int:
     args_in = list(sys.argv[1:] if argv is None else argv)
     if not args_in:
         args_in = ["check"]
-    elif args_in[0] not in {"check", "import-jira", "import-git", "import-artifacts", "-h", "--help"}:
+    elif args_in[0] not in {"check", "import-jira", "import-git", "import-artifacts", "import-evidence", "-h", "--help"}:
         args_in.insert(0, "check")
     args = make_parser().parse_args(args_in)
     try:
         if args.command == "check":
             report = analyze(load_dataset(args.manifest), load_rules(args.rules))
-            print(render_report(report))
-            return 0
+            rendered = {
+                "text": render_report(report),
+                "json": json.dumps(report, indent=2, ensure_ascii=False) + "\n",
+                "html": render_html_report(report),
+            }[args.format]
+            if args.output:
+                args.output.parent.mkdir(parents=True, exist_ok=True)
+                args.output.write_text(rendered, encoding="utf-8")
+                print(f"Wrote {args.format.upper()} report to {args.output}")
+            else:
+                print(rendered, end="" if rendered.endswith("\n") else "\n")
+            return 1 if args.fail_on_block and report["gate"] == "BLOCK" else 0
 
         manifest = load_dataset(args.manifest)
         if args.command == "import-jira":
@@ -450,6 +547,8 @@ def main(argv: list[str] | None = None) -> int:
             merged, artifact_count, edge_count = import_git_history(
                 manifest, args.repository, args.requirement_id, args.kind, args.relation, args.max_commits
             )
+        elif args.command == "import-evidence":
+            merged, artifact_count, edge_count = import_evidence_export(manifest, load_json(args.export))
         else:
             incoming = load_dataset(args.export, require_release=False)
             merged = merge_imports(manifest, incoming["artifacts"], incoming["edges"])
