@@ -1,4 +1,5 @@
 {
+  "schema_version": 1,
   "release": "synthetic-filter-control-v1.4",
   "artifacts": [
     {"id": "REQ-104", "kind": "requirement", "title": "Add programmable packet filter", "revision": "r4"},
@@ -9,7 +10,7 @@
     {"id": "VER-45", "kind": "verification", "title": "Filter regression run", "status": "PASS", "rtl_commit": "0f9e8d"},
     {"id": "FPGA-33", "kind": "fpga_build", "title": "Integration FPGA build", "status": "PASS", "rtl_commit": "1a2b3c"},
     {"id": "BASELINE-14", "kind": "release_baseline", "title": "Candidate release baseline"},
-    {"id": "CLAIM-01", "kind": "claim", "title": "The filter control logic passed regression", "evidence_ids": ["VER-45"]},
+    {"id": "CLAIM-01", "kind": "claim", "title": "The reference model matches requirement revision r4", "evidence_ids": ["RM-09"]},
     {"id": "CLAIM-02", "kind": "claim", "title": "The feature is fully documented for release", "evidence_ids": ["REQ-104"]}
   ],
   "edges": [
