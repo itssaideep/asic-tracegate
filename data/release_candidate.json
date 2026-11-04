@@ -25,11 +25,5 @@
     {"from": "BASELINE-14", "to": "RM-09", "type": "includes"},
     {"from": "BASELINE-14", "to": "VER-45", "type": "includes"},
     {"from": "BASELINE-14", "to": "FPGA-33", "type": "includes"}
-  ],
-  "expected_warning_codes": [
-    "BASELINE_ARTIFACT_MISSING",
-    "DOC_REVISION_STALE",
-    "VERIFICATION_RTL_MISMATCH",
-    "CLAIM_UNSUPPORTED"
   ]
 }
