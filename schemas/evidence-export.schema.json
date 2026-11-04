@@ -1,0 +1,25 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/itssaideep/asic-tracegate/schemas/evidence-export.schema.json",
+  "title": "ASIC TraceGate normalized evidence export",
+  "type": "object",
+  "required": ["records"],
+  "properties": {
+    "records": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["id", "kind", "source_id", "relation"],
+        "properties": {
+          "id": {"type": "string", "minLength": 1},
+          "kind": {"enum": ["design_spec", "reference_model", "verification", "fpga_build"]},
+          "source_id": {"type": "string", "minLength": 1},
+          "relation": {"enum": ["documented_by", "modeled_by", "verified_by", "built_as"]},
+          "title": {"type": "string"}
+        },
+        "additionalProperties": true
+      }
+    }
+  },
+  "additionalProperties": true
+}
