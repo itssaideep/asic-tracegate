@@ -1,0 +1,12 @@
+{
+  "issues": [
+    {
+      "key": "JIRA-883",
+      "fields": {
+        "summary": "Document filter-control reset behavior",
+        "status": {"name": "In Progress"},
+        "labels": ["REQ-104", "release-traceability-demo"]
+      }
+    }
+  ]
+}
