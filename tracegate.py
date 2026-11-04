@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import csv
 import html
 import json
 import re
@@ -145,7 +146,7 @@ def graph_reachable(adjacency: dict[str, list[dict[str, str]]], start: str) -> l
 
 def analyze(data: dict[str, Any], rules: dict[str, Any]) -> dict[str, Any]:
     artifacts, adjacency = index_dataset(data)
-    findings: list[dict[str, str]] = []
+    findings: list[dict[str, Any]] = []
     requirements = [item for item in data["artifacts"] if item["kind"] == rules.get("requirement_kind", "requirement")]
     impact: dict[str, list[str]] = {}
     trace_total = trace_present = evidence_total = evidence_complete = 0
@@ -202,7 +203,7 @@ def analyze(data: dict[str, Any], rules: dict[str, Any]) -> dict[str, Any]:
             source_ids = [aid for aid in linked_by_relation.get(check["source_relation"], [])
                           if artifacts[aid]["kind"] == check["source_kind"]]
             matched: list[str] = []
-            mismatched = False
+            mismatches: list[tuple[str, str]] = []
             for source_id in source_ids:
                 source = artifacts[source_id]
                 for evidence_id in targets(adjacency, source_id, check["relation"]):
@@ -217,12 +218,14 @@ def analyze(data: dict[str, Any], rules: dict[str, Any]) -> dict[str, Any]:
                         matched.append(evidence_id)
                         valid_evidence_ids.add(evidence_id)
                     else:
-                        mismatched = True
-                        add(check["mismatch_finding"], evidence_id,
-                            check["mismatch_message"].format(source_id=source_id))
+                        mismatches.append((evidence_id, source_id))
             if matched:
                 evidence_complete += 1
-            elif not mismatched:
+            elif mismatches:
+                for evidence_id, source_id in mismatches:
+                    add(check["mismatch_finding"], evidence_id,
+                        check["mismatch_message"].format(source_id=source_id))
+            else:
                 add(check["missing_finding"], req_id, check["missing_message"])
 
     claim_kind = rules.get("claim_kind", "claim")
@@ -243,7 +246,10 @@ def analyze(data: dict[str, Any], rules: dict[str, Any]) -> dict[str, Any]:
                 rules.get("claim_message", "Claim has no linked current evidence of an accepted type."))
 
     blocking_codes = set(rules.get("blocking_findings", [item["code"] for item in findings]))
+    for finding in findings:
+        finding["severity"] = "BLOCK" if finding["code"] in blocking_codes else "WARN"
     blocking_count = sum(item["code"] in blocking_codes for item in findings)
+    warning_count = len(findings) - blocking_count
     gate = "BLOCK" if blocking_count else ("WARN" if findings else "PASS")
     return {
         "release": data.get("release", "unnamed-release"),
@@ -257,7 +263,9 @@ def analyze(data: dict[str, Any], rules: dict[str, Any]) -> dict[str, Any]:
         "unsupported_claim_rate": len(unsupported_claims) / len(claims) if claims else 0.0,
         "unsupported_claims": unsupported_claims,
         "findings": findings,
+        "findings_total": len(findings),
         "blocking_finding_count": blocking_count,
+        "warning_finding_count": warning_count,
         "change_impact": impact,
         "gate": gate,
     }
@@ -268,6 +276,7 @@ def render_report(report: dict[str, Any]) -> str:
         f"TraceGate report: {report['release']}",
         f"Release gate: {report['gate']}",
         f"Blocking findings: {report['blocking_finding_count']}",
+        f"Warnings: {report['warning_finding_count']}",
         f"Traceability coverage: {report['traceability_coverage']:.0%} "
         f"({report['traceability_links_present']}/{report['traceability_links_expected']} required links)",
         f"Evidence completeness: {report['evidence_completeness']:.0%} "
@@ -277,9 +286,12 @@ def render_report(report: dict[str, Any]) -> str:
         "Findings:",
     ]
     if report["findings"]:
-        lines.extend(f"- [{item['code']}] {item['artifact_id']}: {item['message']}" for item in report["findings"])
+        lines.extend(f"- [{item['severity']} {item['code']}] {item['artifact_id']}: {item['message']}"
+                     for item in report["findings"])
     else:
         lines.append("- None")
+    if report.get("findings_hidden", 0):
+        lines.append(f"- {report['findings_hidden']} additional findings hidden by severity filter")
     lines.extend(["", "Change impact:"])
     for req_id, impacted in report["change_impact"].items():
         lines.append(f"- {req_id} -> {', '.join(impacted) if impacted else '(no linked artifacts)'}")
@@ -288,11 +300,12 @@ def render_report(report: dict[str, Any]) -> str:
 
 def render_html_report(report: dict[str, Any]) -> str:
     findings = "".join(
-        "<tr><td>{}</td><td>{}</td><td>{}</td></tr>".format(
-            html.escape(item["code"]), html.escape(item["artifact_id"]), html.escape(item["message"])
+        "<tr><td>{}</td><td>{}</td><td>{}</td><td>{}</td></tr>".format(
+            html.escape(item["severity"]), html.escape(item["code"]),
+            html.escape(item["artifact_id"]), html.escape(item["message"])
         )
         for item in report["findings"]
-    ) or '<tr><td colspan="3">No findings</td></tr>'
+    ) or '<tr><td colspan="4">No findings</td></tr>'
     impact = "".join(
         "<li><strong>{}</strong> → {}</li>".format(
             html.escape(req_id), html.escape(", ".join(ids) if ids else "No linked artifacts")
@@ -316,7 +329,8 @@ table{{width:100%;border-collapse:collapse}}th,td{{padding:.65rem;text-align:lef
 <div class="card"><div>Evidence completeness</div><div class="value">{report['evidence_completeness']:.0%}</div><div>{report['evidence_items_current']} / {report['evidence_items_expected']} checks</div></div>
 <div class="card"><div>Unsupported claims</div><div class="value">{report['unsupported_claim_rate']:.0%}</div><div>{len(report['unsupported_claims'])} unsupported</div></div>
 </div>
-<h2>Findings</h2><table><thead><tr><th>Code</th><th>Artifact</th><th>Details</th></tr></thead><tbody>{findings}</tbody></table>
+<h2>Findings</h2><p>{report['findings_total']} total · {report['blocking_finding_count']} blocking · {report['warning_finding_count']} warnings · showing {len(report['findings'])}</p>
+<table><thead><tr><th>Severity</th><th>Code</th><th>Artifact</th><th>Details</th></tr></thead><tbody>{findings}</tbody></table>
 <h2>Change impact</h2><ul>{impact}</ul>
 </body></html>"""
 
@@ -473,6 +487,60 @@ def import_evidence_export(manifest: dict[str, Any], export: Any) -> tuple[dict[
     return merge_imports(manifest, artifacts, edges), len(artifacts), len(edges)
 
 
+def import_csv_evidence_export(manifest: dict[str, Any], path: Path, kind: str,
+                               id_column: str, source_id_column: str,
+                               relation: str | None, field_map_path: Path | None
+                               ) -> tuple[dict[str, Any], int, int]:
+    if kind not in EVIDENCE_LINKS:
+        raise DatasetError(f"unsupported evidence kind {kind!r}")
+    relation = relation or EVIDENCE_LINKS[kind][1]
+    expected_relation = EVIDENCE_LINKS[kind][1]
+    if relation != expected_relation:
+        raise DatasetError(f"{kind} records must use relation {expected_relation}")
+    field_map: dict[str, str] = {}
+    if field_map_path:
+        raw_mapping = load_json(field_map_path)
+        if not isinstance(raw_mapping, dict) or any(
+            not isinstance(key, str) or not isinstance(value, str)
+            for key, value in raw_mapping.items()
+        ):
+            raise DatasetError("CSV field map must be a JSON object of artifact-field to CSV-column strings")
+        field_map = raw_mapping
+    reserved = {"id", "kind", "source_id", "relation"}
+    if reserved & field_map.keys():
+        raise DatasetError("CSV field map cannot override id, kind, source_id, or relation")
+    try:
+        with path.open("r", encoding="utf-8-sig", newline="") as csv_file:
+            reader = csv.DictReader(csv_file)
+            headers = reader.fieldnames or []
+            required_columns = {id_column, source_id_column, *field_map.values()}
+            missing = sorted(required_columns - set(headers))
+            if missing:
+                raise DatasetError("CSV is missing columns: " + ", ".join(missing))
+            records = []
+            for row_number, row in enumerate(reader, start=2):
+                artifact_id = (row.get(id_column) or "").strip()
+                source_id = (row.get(source_id_column) or "").strip()
+                if not artifact_id or not source_id:
+                    raise DatasetError(f"CSV row {row_number} has an empty artifact ID or source ID")
+                record: dict[str, Any] = {
+                    "id": artifact_id,
+                    "kind": kind,
+                    "source_id": source_id,
+                    "relation": relation,
+                }
+                for artifact_field, column in field_map.items():
+                    value = row.get(column)
+                    if value is not None and value.strip():
+                        record[artifact_field] = value.strip()
+                records.append(record)
+    except OSError as exc:
+        raise DatasetError(f"cannot read CSV export {path}: {exc}") from exc
+    except UnicodeError as exc:
+        raise DatasetError(f"CSV export {path} must be UTF-8 encoded: {exc}") from exc
+    return import_evidence_export(manifest, {"records": records})
+
+
 def write_dataset(path: Path, data: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
@@ -487,7 +555,11 @@ def make_parser() -> argparse.ArgumentParser:
     check.add_argument("--rules", type=Path, default=DEFAULT_RULES)
     check.add_argument("--format", choices=("text", "json", "html"), default="text")
     check.add_argument("--output", type=Path, help="write the report to this file instead of standard output")
-    check.add_argument("--fail-on-block", action="store_true", help="exit with status 1 when the gate is BLOCK")
+    check.add_argument("--severity", choices=("all", "block", "warn"), default="all",
+                       help="show all findings, only blockers, or only warnings")
+    ci_status = check.add_mutually_exclusive_group()
+    ci_status.add_argument("--fail-on-block", action="store_true", help="exit with status 1 when the gate is BLOCK")
+    ci_status.add_argument("--fail-on-warn", action="store_true", help="exit with status 1 for WARN or BLOCK")
 
     jira = commands.add_parser("import-jira", help="merge a Jira JSON export into a manifest")
     jira.add_argument("export", type=Path)
@@ -514,6 +586,18 @@ def make_parser() -> argparse.ArgumentParser:
     evidence.add_argument("export", type=Path)
     evidence.add_argument("--manifest", type=Path, default=DEFAULT_MANIFEST)
     evidence.add_argument("--output", type=Path, default=DEFAULT_OUTPUT)
+
+    csv_evidence = commands.add_parser(
+        "import-csv-evidence", help="import flat CSV exports for documents, models, verification, or builds"
+    )
+    csv_evidence.add_argument("export", type=Path)
+    csv_evidence.add_argument("--kind", required=True, choices=tuple(EVIDENCE_LINKS))
+    csv_evidence.add_argument("--id-column", default="id")
+    csv_evidence.add_argument("--source-id-column", default="source_id")
+    csv_evidence.add_argument("--relation", help="defaults to the standard relation for --kind")
+    csv_evidence.add_argument("--field-map", type=Path, help="JSON map of artifact fields to CSV column names")
+    csv_evidence.add_argument("--manifest", type=Path, default=DEFAULT_MANIFEST)
+    csv_evidence.add_argument("--output", type=Path, default=DEFAULT_OUTPUT)
     return parser
 
 
@@ -521,12 +605,18 @@ def main(argv: list[str] | None = None) -> int:
     args_in = list(sys.argv[1:] if argv is None else argv)
     if not args_in:
         args_in = ["check"]
-    elif args_in[0] not in {"check", "import-jira", "import-git", "import-artifacts", "import-evidence", "-h", "--help"}:
+    elif args_in[0] not in {"check", "import-jira", "import-git", "import-artifacts", "import-evidence",
+                            "import-csv-evidence", "-h", "--help"}:
         args_in.insert(0, "check")
     args = make_parser().parse_args(args_in)
     try:
         if args.command == "check":
             report = analyze(load_dataset(args.manifest), load_rules(args.rules))
+            all_findings = report["findings"]
+            if args.severity != "all":
+                selected = "BLOCK" if args.severity == "block" else "WARN"
+                report["findings"] = [item for item in all_findings if item["severity"] == selected]
+                report["findings_hidden"] = len(all_findings) - len(report["findings"])
             rendered = {
                 "text": render_report(report),
                 "json": json.dumps(report, indent=2, ensure_ascii=False) + "\n",
@@ -538,6 +628,8 @@ def main(argv: list[str] | None = None) -> int:
                 print(f"Wrote {args.format.upper()} report to {args.output}")
             else:
                 print(rendered, end="" if rendered.endswith("\n") else "\n")
+            if args.fail_on_warn and report["gate"] in {"WARN", "BLOCK"}:
+                return 1
             return 1 if args.fail_on_block and report["gate"] == "BLOCK" else 0
 
         manifest = load_dataset(args.manifest)
@@ -549,6 +641,11 @@ def main(argv: list[str] | None = None) -> int:
             )
         elif args.command == "import-evidence":
             merged, artifact_count, edge_count = import_evidence_export(manifest, load_json(args.export))
+        elif args.command == "import-csv-evidence":
+            merged, artifact_count, edge_count = import_csv_evidence_export(
+                manifest, args.export, args.kind, args.id_column, args.source_id_column,
+                args.relation, args.field_map
+            )
         else:
             incoming = load_dataset(args.export, require_release=False)
             merged = merge_imports(manifest, incoming["artifacts"], incoming["edges"])
@@ -558,6 +655,9 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     except DatasetError as exc:
         print(f"Input error: {exc}", file=sys.stderr)
+        return 2
+    except OSError as exc:
+        print(f"File error: {exc}", file=sys.stderr)
         return 2
 
 

@@ -31,7 +31,11 @@ python tracegate.py check --format json --output output\report.json
 python tracegate.py check --format html --output output\report.html
 ```
 
-Use `--fail-on-block` to return exit code `1` when the gate is BLOCK, for example in a local script or CI job.
+Use `--fail-on-block` to return exit code `1` when the gate is BLOCK, or `--fail-on-warn` to fail on either WARN or BLOCK. `--severity block` and `--severity warn` filter displayed findings while retaining the overall gate counts:
+
+```powershell
+python tracegate.py check --fail-on-block --severity block
+```
 
 ## What the example demonstrates
 
@@ -53,6 +57,7 @@ The example is deliberately imperfect so you can see the checks working. All art
 - `rules.json`: required artifact links, revision checks, evidence checks, baseline coverage, and which finding codes block a release.
 - `schemas/`: JSON Schema files for manifests, rules, and normalized evidence exports.
 - `viewer.html`: a local browser interface for browsing the downstream artifact graph of each requirement.
+- `import-csv-evidence`: a field-mapped CSV adapter for document, model, verification, and build exports.
 
 The built-in loader checks required fields, basic types, duplicate artifact IDs, and dangling edge references. It does not install or require a JSON Schema package. Keep `schema_version` at `1` when adding fields; make a deliberate format change before changing its value.
 
@@ -98,6 +103,14 @@ python tracegate.py import-evidence data\evidence_export.json --output data\rele
 
 Each record needs `id`, `kind`, `source_id`, and `relation`. Supported link pairs are `design_spec` from a `requirement` via `documented_by`, `reference_model` from a `requirement` via `modeled_by`, `verification` from an `rtl_change` via `verified_by`, and `fpga_build` from an `rtl_change` via `built_as`. Other fields on a record, such as `status`, `rtl_commit`, and `requirement_revision`, are preserved. Adapt source exports into this format and check `schemas/evidence-export.schema.json`.
 
+Flat CSV exports can be mapped without first converting them to JSON. The kind selects the expected relationship; provide the export's ID/source columns and a JSON map from TraceGate artifact fields to CSV header names:
+
+```powershell
+python tracegate.py import-csv-evidence data\verification_export.csv --kind verification --id-column run_id --source-id-column rtl_id --field-map data\verification_field_map.json --output data\release_with_csv.json
+```
+
+The included field map maps `rtl_revision` to `rtl_commit`, `result` to `status`, and `summary` to `title`. The same adapter supports `design_spec`, `reference_model`, and `fpga_build` records. It validates that the source artifact and relationship match the chosen kind.
+
 Open `viewer.html` in a browser and load a manifest such as `data/release_candidate.json`. Select a requirement to see all downstream artifacts and links. The viewer reads the chosen file locally in the browser.
 
 ## Current limitations
@@ -106,4 +119,4 @@ Jira import currently reads exported JSON files; Git import reads local history 
 
 ## Scope
 
-The report exporter, normalized evidence adapter, and local graph viewer are included. Vendor-specific APIs and export formats still need explicit field mapping; TraceGate does not fetch or authenticate to those systems.
+The report exporter, JSON and CSV evidence adapters, and local graph viewer are included. Vendor-specific APIs and export formats still need explicit field mapping; TraceGate does not fetch or authenticate to those systems.
