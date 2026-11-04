@@ -1,0 +1,74 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/itssaideep/asic-tracegate/schemas/release-rules.schema.json",
+  "title": "ASIC TraceGate release rules",
+  "type": "object",
+  "required": ["schema_version", "required_relations", "revision_checks", "evidence_checks"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "requirement_kind": {"type": "string"},
+    "required_relations": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["relation", "kind", "finding"],
+        "properties": {
+          "relation": {"type": "string", "minLength": 1},
+          "kind": {"type": "string", "minLength": 1},
+          "finding": {"type": "string", "minLength": 1},
+          "message": {"type": "string"},
+          "required": {"type": "boolean"}
+        },
+        "additionalProperties": false
+      }
+    },
+    "revision_checks": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["relation", "kind", "requirement_revision_field", "evidence_revision_field", "finding", "message"],
+        "properties": {
+          "relation": {"type": "string", "minLength": 1},
+          "kind": {"type": "string", "minLength": 1},
+          "requirement_revision_field": {"type": "string", "minLength": 1},
+          "evidence_revision_field": {"type": "string", "minLength": 1},
+          "finding": {"type": "string", "minLength": 1},
+          "message": {"type": "string", "minLength": 1}
+        },
+        "additionalProperties": false
+      }
+    },
+    "evidence_checks": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["source_relation", "source_kind", "relation", "kind", "status_field", "required_status", "source_revision_field", "evidence_revision_field", "mismatch_finding", "missing_finding", "mismatch_message", "missing_message"],
+        "properties": {
+          "source_relation": {"type": "string", "minLength": 1},
+          "source_kind": {"type": "string", "minLength": 1},
+          "relation": {"type": "string", "minLength": 1},
+          "kind": {"type": "string", "minLength": 1},
+          "status_field": {"type": "string", "minLength": 1},
+          "required_status": {"type": "string", "minLength": 1},
+          "source_revision_field": {"type": "string", "minLength": 1},
+          "evidence_revision_field": {"type": "string", "minLength": 1},
+          "mismatch_finding": {"type": "string", "minLength": 1},
+          "missing_finding": {"type": "string", "minLength": 1},
+          "mismatch_message": {"type": "string", "minLength": 1},
+          "missing_message": {"type": "string", "minLength": 1}
+        },
+        "additionalProperties": false
+      }
+    },
+    "claim_kind": {"type": "string"},
+    "claim_evidence_kinds": {"type": "array", "items": {"type": "string"}},
+    "claim_finding": {"type": "string"},
+    "claim_message": {"type": "string"},
+    "blocking_findings": {"type": "array", "items": {"type": "string", "minLength": 1}},
+    "baseline_kind": {"type": "string"},
+    "baseline_relation": {"type": "string"},
+    "baseline_finding": {"type": "string"},
+    "baseline_artifact_kinds": {"type": "array", "items": {"type": "string"}}
+  },
+  "additionalProperties": false
+}
