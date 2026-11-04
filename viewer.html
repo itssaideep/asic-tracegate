@@ -8,11 +8,15 @@
     :root { color-scheme: light dark; font: 16px/1.45 system-ui, sans-serif; }
     body { max-width: 1300px; margin: 0 auto; padding: 1.5rem; }
     h1 { margin-bottom: .25rem; }
+    .header-row { display: flex; align-items: baseline; justify-content: space-between; flex-wrap: wrap; gap: 0.5rem; }
     .muted { color: GrayText; }
     .controls { display: flex; flex-wrap: wrap; gap: .8rem; align-items: end; margin: 1.2rem 0; }
+    .presets { display: flex; gap: 0.5rem; align-items: center; margin-bottom: 0.8rem; flex-wrap: wrap; }
+    .btn-preset { font: inherit; font-size: 13px; padding: 0.35rem 0.65rem; border-radius: 6px; border: 1px solid GrayText; background: Canvas; cursor: pointer; }
+    .btn-preset:hover { background: color-mix(in srgb, Canvas 90%, #3478d4 10%); }
     label { display: grid; gap: .3rem; font-weight: 600; }
     input, select, button { font: inherit; padding: .55rem .7rem; }
-    .layout { display: grid; grid-template-columns: minmax(0, 2fr) minmax(250px, 1fr); gap: 1rem; }
+    .layout { display: grid; grid-template-columns: minmax(0, 2fr) minmax(280px, 1fr); gap: 1rem; }
     .panel { border: 1px solid GrayText; border-radius: 12px; padding: 1rem; min-width: 0; }
     .graph-scroll { overflow: auto; min-height: 420px; }
     svg { display: block; }
@@ -22,20 +26,37 @@
     .node text { fill: CanvasText; font-size: 13px; pointer-events: none; }
     .node { cursor: pointer; }
     .edge-label { fill: GrayText; font-size: 11px; }
-    pre { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 65vh; overflow: auto; }
+    pre { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 50vh; overflow: auto; background: color-mix(in srgb, Canvas 96%, #87909c 4%); padding: 0.5rem; border-radius: 6px; }
     #status { margin: .8rem 0; }
+    .badge { display: inline-block; padding: 2px 8px; border-radius: 999px; font-size: 12px; font-weight: 600; }
+    .badge-fictional { background: #b8790022; color: #b87900; border: 1px solid #b87900; }
+    .badge-real { background: #21834a22; color: #21834a; border: 1px solid #21834a; }
+    .badge-verified { background: #21834a22; color: #21834a; border: 1px solid #21834a; margin-top: 4px; }
+    .provenance-card { background: color-mix(in srgb, Canvas 95%, #3478d4 5%); border: 1px solid #3478d455; border-radius: 8px; padding: 0.8rem; margin: 0.8rem 0; font-size: 13px; display: grid; gap: 0.4rem; }
+    .provenance-title { font-weight: 700; color: #3478d4; }
+    .provenance-card code { font-size: 11px; word-break: break-all; }
     @media (max-width: 800px) { .layout { grid-template-columns: 1fr; } body { padding: .8rem; } }
   </style>
 </head>
 <body>
-  <h1>ASIC TraceGate Impact Explorer</h1>
-  <p class="muted">Load a release manifest to explore the artifacts connected to a requirement. The file stays in your browser.</p>
+  <div class="header-row">
+    <div>
+      <h1>ASIC TraceGate Impact Explorer</h1>
+      <p class="muted">Explore artifact dependency graphs, requirements traceability, and cryptographic supply-chain provenance.</p>
+    </div>
+    <div id="releaseBadge"></div>
+  </div>
+  <div class="presets">
+    <span class="muted" style="font-size: 13px;">Presets:</span>
+    <button type="button" class="btn-preset" id="loadSampleBtn">Sample candidate (Fictional)</button>
+    <button type="button" class="btn-preset" id="loadRealBtn">GitHub release (Real)</button>
+  </div>
   <div class="controls">
     <label>Release manifest <input id="manifestFile" type="file" accept="application/json,.json"></label>
-    <label>Requirement <select id="requirement" disabled><option>Load a manifest first</option></select></label>
+    <label>Root Artifact / Requirement <select id="requirement" disabled><option>Load a manifest first</option></select></label>
     <label>Highlight artifacts <input id="search" type="search" placeholder="Filter by ID, kind, or title" disabled></label>
   </div>
-  <div id="status" role="status" class="muted">Choose data/release_candidate.json to get started.</div>
+  <div id="status" role="status" class="muted">Choose a manifest or click a preset to get started.</div>
   <div class="layout">
     <section class="panel" aria-label="Requirement impact graph">
       <div class="graph-scroll"><svg id="graph" role="img" aria-label="Dependency graph"></svg></div>
@@ -43,6 +64,7 @@
     <aside class="panel">
       <h2>Artifact details</h2>
       <p id="detailHint" class="muted">Select a node in the graph to inspect its manifest fields.</p>
+      <div id="provenanceCard"></div>
       <pre id="details"></pre>
     </aside>
   </div>
@@ -56,6 +78,10 @@
       const status = document.querySelector("#status");
       const details = document.querySelector("#details");
       const detailHint = document.querySelector("#detailHint");
+      const provenanceCard = document.querySelector("#provenanceCard");
+      const releaseBadge = document.querySelector("#releaseBadge");
+      const loadSampleBtn = document.querySelector("#loadSampleBtn");
+      const loadRealBtn = document.querySelector("#loadRealBtn");
       let manifest = null;
       let selectedArtifact = null;
 
@@ -70,6 +96,38 @@
         if (!artifact) return;
         selectedArtifact = id;
         detailHint.textContent = `${artifact.id} · ${artifact.kind}`;
+
+        provenanceCard.innerHTML = "";
+        const prov = artifact.provenance || {};
+        if (artifact.source === "github_history" || artifact.content_digest) {
+          const card = document.createElement("div");
+          card.className = "provenance-card";
+          let html = `<div class="provenance-title">Cryptographic Provenance</div>`;
+          html += `<div><strong>Source:</strong> ${artifact.source || "unspecified"}</div>`;
+          if (prov.repository_url) {
+            html += `<div><strong>Repository:</strong> <a href="${prov.repository_url}" target="_blank" rel="noopener noreferrer">${prov.repository_url}</a></div>`;
+          }
+          if (artifact.commit || prov.commit_sha) {
+            const sha = artifact.commit || prov.commit_sha;
+            const commitUrl = prov.html_url || (prov.repository_url ? `${prov.repository_url}/commit/${sha}` : "");
+            html += `<div><strong>Commit:</strong> ${commitUrl ? `<a href="${commitUrl}" target="_blank" rel="noopener noreferrer"><code>${sha.slice(0, 10)}...</code> ↗</a>` : `<code>${sha}</code>`}</div>`;
+          }
+          if (prov.author || prov.author_name) {
+            html += `<div><strong>Author:</strong> ${prov.author || prov.author_name}</div>`;
+          }
+          if (prov.authored_date || prov.committed_date) {
+            html += `<div><strong>Date:</strong> ${prov.authored_date || prov.committed_date}</div>`;
+          }
+          if (artifact.content_digest) {
+            html += `<div><strong>SHA-256 Digest:</strong> <code>${artifact.content_digest}</code></div>`;
+          }
+          if (prov.verified) {
+            html += `<div><span class="badge badge-verified">✓ Verified Commit Signature</span></div>`;
+          }
+          card.innerHTML = html;
+          provenanceCard.appendChild(card);
+        }
+
         details.textContent = JSON.stringify(artifact, null, 2);
         graph.querySelectorAll(".node").forEach((node) => {
           node.classList.toggle("selected", node.dataset.id === id);
@@ -160,32 +218,63 @@
         status.textContent = `${depth.size} connected artifacts · ${Math.max(0, depth.size - 1)} downstream from ${rootId}`;
       }
 
+      function loadManifest(parsed, sourceName) {
+        if (!Array.isArray(parsed.artifacts) || !Array.isArray(parsed.edges)) {
+          throw new Error("Expected artifacts and edges arrays.");
+        }
+        manifest = parsed;
+        releaseBadge.innerHTML = "";
+        const badge = document.createElement("span");
+        if (manifest.fictional) {
+          badge.className = "badge badge-fictional";
+          badge.textContent = "Fictional Sample";
+        } else {
+          badge.className = "badge badge-real";
+          badge.textContent = "Production / Real Manifest";
+        }
+        releaseBadge.appendChild(badge);
+
+        const requirements = manifest.artifacts.filter((item) => item.kind === "requirement");
+        const rootCandidates = requirements.length ? requirements : manifest.artifacts;
+        requirementSelect.replaceChildren();
+        rootCandidates.forEach((item) => {
+          const option = document.createElement("option");
+          option.value = item.id;
+          option.textContent = `${item.id} — ${item.title || item.kind}`;
+          requirementSelect.append(option);
+        });
+        requirementSelect.disabled = rootCandidates.length === 0;
+        searchInput.disabled = rootCandidates.length === 0;
+        status.textContent = `Loaded ${manifest.artifacts.length} artifacts and ${manifest.edges.length} links from ${sourceName} (Release: ${manifest.release || "unnamed"}).`;
+        render();
+      }
+
       fileInput.addEventListener("change", async () => {
         const file = fileInput.files && fileInput.files[0];
         if (!file) return;
         try {
           const parsed = JSON.parse(await file.text());
-          if (!Array.isArray(parsed.artifacts) || !Array.isArray(parsed.edges)) throw new Error("Expected artifacts and edges arrays.");
-          manifest = parsed;
-          const requirements = manifest.artifacts.filter((item) => item.kind === "requirement");
-          requirementSelect.replaceChildren();
-          requirements.forEach((item) => {
-            const option = document.createElement("option");
-            option.value = item.id;
-            option.textContent = `${item.id} — ${item.title || "Requirement"}`;
-            requirementSelect.append(option);
-          });
-          requirementSelect.disabled = requirements.length === 0;
-          searchInput.disabled = requirements.length === 0;
-          if (!requirements.length) throw new Error("No artifacts with kind 'requirement' were found.");
-          status.textContent = `Loaded ${manifest.artifacts.length} artifacts and ${manifest.edges.length} links from ${file.name}.`;
-          render();
+          loadManifest(parsed, file.name);
         } catch (error) {
           manifest = null;
           graph.replaceChildren();
           status.textContent = `Could not load manifest: ${error.message}`;
         }
       });
+
+      async function tryFetchPreset(path) {
+        try {
+          const resp = await fetch(path);
+          if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+          const parsed = await resp.json();
+          loadManifest(parsed, path);
+        } catch (err) {
+          status.textContent = `Cannot auto-fetch preset (${err.message}). Use the file chooser to select ${path} manually.`;
+        }
+      }
+
+      loadSampleBtn.addEventListener("click", () => tryFetchPreset("data/release_candidate.json"));
+      loadRealBtn.addEventListener("click", () => tryFetchPreset("data/real_github_manifest.json"));
       requirementSelect.addEventListener("change", render);
       searchInput.addEventListener("input", render);
     })();

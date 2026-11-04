@@ -69,7 +69,7 @@
   "baseline_relation": "includes",
   "baseline_finding": "BASELINE_ARTIFACT_MISSING",
   "baseline_artifact_kinds": [
-    "requirement", "work_item", "rtl_change", "design_spec",
+    "requirement", "work_item", "rtl_change", "source_change", "design_spec",
     "reference_model", "verification", "fpga_build"
   ]
 }

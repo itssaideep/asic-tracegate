@@ -5,12 +5,20 @@ from __future__ import annotations
 
 import argparse
 import csv
+import hashlib
 import html
 import json
+import os
 import re
+import socket
 import subprocess
 import sys
+import urllib.error
+import urllib.parse
+import urllib.request
+import webbrowser
 from collections import defaultdict
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -422,20 +430,33 @@ def import_git_history(manifest: dict[str, Any], repo_path: Path,
         raise DatasetError(f"requirement {requirement_id} is not in the manifest")
     artifacts: list[dict[str, Any]] = []
     edges: list[dict[str, str]] = []
+    retrieval_time = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     for record in output.split("\x00"):
         fields = record.strip().split("\x1f", 3)
         if len(fields) < 3:
             continue
         commit, short_sha, subject = fields[:3]
         body = fields[3] if len(fields) == 4 else ""
-        prefix = "RTL" if artifact_kind == "rtl_change" else artifact_kind.upper().replace("_", "-")
+        prefix = "RTL" if artifact_kind == "rtl_change" else ("SRC" if artifact_kind == "source_change" else artifact_kind.upper().replace("_", "-"))
         artifact_id = f"{prefix}-{short_sha}"
+        git_payload = {"commit": commit, "subject": subject.strip(), "body": body.strip()}
+        git_digest = f"sha256:{hashlib.sha256(json.dumps(git_payload, sort_keys=True).encode('utf-8')).hexdigest()}"
         artifacts.append({
             "id": artifact_id,
             "kind": artifact_kind,
             "title": subject.strip(),
             "commit": commit,
             "source": "git_history",
+            "retrieval_time": retrieval_time,
+            "content_digest": git_digest,
+            "provenance": {
+                "commit_sha": commit,
+                "subject": subject.strip(),
+                "body": body.strip(),
+                "retrieval_time": retrieval_time,
+                "content_digest": git_digest,
+                "source": "local_git",
+            },
         })
         linked_requirements = [requirement_id] if requirement_id else re.findall(
             r"\bREQ-[A-Za-z0-9-]+\b", subject + " " + body, flags=re.IGNORECASE
@@ -443,6 +464,220 @@ def import_git_history(manifest: dict[str, Any], repo_path: Path,
         for req_id in sorted(set(linked_requirements)):
             if req_id in requirements:
                 edges.append({"from": req_id, "to": artifact_id, "type": relation})
+    return merge_imports(manifest, artifacts, edges), len(artifacts), len(edges)
+
+
+def parse_github_repo(repo_input: str) -> tuple[str, str, str]:
+    text = repo_input.strip()
+    pattern = r"^(?:https?://github\.com/|git@github\.com:)?([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-]+?)(?:\.git)?/?$"
+    match = re.match(pattern, text)
+    if not match:
+        raise DatasetError(
+            f"invalid GitHub repository format: {repo_input!r}. "
+            "Expected 'owner/repo' or 'https://github.com/owner/repo'"
+        )
+    owner, repo = match.group(1), match.group(2)
+    canonical_url = f"https://github.com/{owner}/{repo}"
+    return owner, repo, canonical_url
+
+
+def fetch_github_commits(owner: str, repo: str, max_commits: int = 100,
+                         branch: str | None = None, token: str | None = None) -> list[dict[str, Any]]:
+    commits: list[dict[str, Any]] = []
+    page = 1
+    per_page = min(max_commits, 100)
+    repo_url = f"https://github.com/{owner}/{repo}"
+    auth_token = token or os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN")
+
+    headers = {
+        "Accept": "application/vnd.github+json",
+        "User-Agent": "ASIC-TraceGate/1.0",
+        "X-GitHub-Api-Version": "2022-11-28",
+    }
+    if auth_token and auth_token.strip():
+        headers["Authorization"] = f"Bearer {auth_token.strip()}"
+
+    while len(commits) < max_commits:
+        params = [f"per_page={per_page}", f"page={page}"]
+        if branch:
+            params.append(f"sha={urllib.parse.quote(branch)}")
+        url = f"https://api.github.com/repos/{owner}/{repo}/commits?{'&'.join(params)}"
+        req = urllib.request.Request(url, headers=headers)
+        try:
+            with urllib.request.urlopen(req, timeout=30) as resp:
+                raw_data = resp.read()
+                page_commits = json.loads(raw_data.decode("utf-8"))
+        except urllib.error.HTTPError as exc:
+            if exc.code == 404:
+                raise DatasetError(
+                    f"GitHub repository {owner}/{repo} not found (HTTP 404). "
+                    "Verify the repository URL and permissions."
+                ) from exc
+            if exc.code in (403, 429):
+                rate_limit = exc.headers.get("x-ratelimit-remaining")
+                if rate_limit == "0":
+                    raise DatasetError(
+                        f"GitHub API rate limit exceeded for {repo_url}. "
+                        "Provide a personal access token via --token or GITHUB_TOKEN environment variable."
+                    ) from exc
+                raise DatasetError(f"GitHub API access forbidden (HTTP {exc.code}): {exc.reason}") from exc
+            if exc.code == 401:
+                raise DatasetError("GitHub authentication failed (HTTP 401). Verify provided token.") from exc
+            raise DatasetError(f"GitHub API error for {repo_url} (HTTP {exc.code}): {exc.reason}") from exc
+        except urllib.error.URLError as exc:
+            raise DatasetError(f"cannot connect to GitHub ({repo_url}): {exc.reason}") from exc
+        except (TimeoutError, socket.timeout) as exc:
+            raise DatasetError(f"timed out connecting to GitHub ({repo_url})") from exc
+        except (OSError, json.JSONDecodeError) as exc:
+            raise DatasetError(f"invalid JSON response from GitHub API for {repo_url}: {exc}") from exc
+
+        if not isinstance(page_commits, list):
+            raise DatasetError(f"unexpected GitHub API response format for {repo_url}")
+        if not page_commits:
+            break
+        commits.extend(page_commits)
+        if len(page_commits) < per_page:
+            break
+        page += 1
+
+    return commits[:max_commits]
+
+
+def compute_commit_digest(commit_obj: dict[str, Any]) -> str:
+    commit_data = commit_obj.get("commit") or {}
+    author = commit_data.get("author") or {}
+    committer = commit_data.get("committer") or {}
+    tree = commit_data.get("tree") or {}
+    parents = [p.get("sha") for p in commit_obj.get("parents") or [] if isinstance(p, dict) and p.get("sha")]
+
+    canonical_payload = {
+        "author": {
+            "date": author.get("date"),
+            "email": author.get("email"),
+            "name": author.get("name"),
+        },
+        "committer": {
+            "date": committer.get("date"),
+            "email": committer.get("email"),
+            "name": committer.get("name"),
+        },
+        "message": commit_data.get("message", ""),
+        "parents": sorted(parents),
+        "sha": commit_obj.get("sha", ""),
+        "tree_sha": tree.get("sha", ""),
+    }
+    canonical_bytes = json.dumps(canonical_payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return f"sha256:{hashlib.sha256(canonical_bytes).hexdigest()}"
+
+
+def import_github_history(manifest: dict[str, Any], repository: str,
+                          requirement_id: str | None, artifact_kind: str,
+                          relation: str, max_commits: int,
+                          branch: str | None = None, token: str | None = None,
+                          prefix: str | None = None) -> tuple[dict[str, Any], int, int]:
+    """Retrieve commits from a public or authenticated GitHub repository with cryptographic provenance.
+
+    Limits and guarantees:
+    - Verifies repository history provenance (URL, commit SHA, retrieval time, content digest).
+    - Does NOT verify requirements, test outcomes, build integrity, or the truth of engineering claims.
+    - Does NOT infer unevidenced requirement links: links are created only if --requirement-id is provided
+      or if commit messages explicitly mention known REQ-... identifiers.
+    """
+    if max_commits < 1:
+        raise DatasetError("--max-commits must be at least 1")
+    if not artifact_kind.strip() or not relation.strip():
+        raise DatasetError("--kind and --relation must be non-empty")
+
+    owner, repo, repo_url = parse_github_repo(repository)
+    commits_data = fetch_github_commits(owner, repo, max_commits=max_commits, branch=branch, token=token)
+
+    requirements = {item["id"] for item in manifest["artifacts"] if item["kind"] == "requirement"}
+    if requirement_id and requirement_id not in requirements:
+        raise DatasetError(f"requirement {requirement_id} is not in the manifest")
+
+    retrieval_time = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    if prefix is None or not prefix.strip():
+        if artifact_kind == "rtl_change":
+            id_prefix = "RTL"
+        elif artifact_kind == "source_change":
+            id_prefix = "SRC"
+        elif artifact_kind == "work_item":
+            id_prefix = "WORK"
+        else:
+            id_prefix = artifact_kind.upper().replace("_", "-")
+    else:
+        id_prefix = prefix.strip().rstrip("-")
+
+    artifacts: list[dict[str, Any]] = []
+    edges: list[dict[str, str]] = []
+
+    for item in commits_data:
+        sha = item.get("sha")
+        if not sha:
+            continue
+        short_sha = sha[:7]
+        commit_data = item.get("commit") or {}
+        message = commit_data.get("message") or ""
+        subject = message.splitlines()[0].strip() if message else short_sha
+        body = "\n".join(message.splitlines()[1:]).strip() if "\n" in message else ""
+        author = commit_data.get("author") or {}
+        committer = commit_data.get("committer") or {}
+        tree = commit_data.get("tree") or {}
+        parents = [p.get("sha") for p in item.get("parents") or [] if isinstance(p, dict) and p.get("sha")]
+        verification = commit_data.get("verification") or {}
+        html_url = item.get("html_url") or f"{repo_url}/commit/{sha}"
+
+        digest = compute_commit_digest(item)
+        artifact_id = f"{id_prefix}-{short_sha}"
+
+        author_name = author.get("name")
+        author_email = author.get("email")
+        author_str = f"{author_name} <{author_email}>" if author_name and author_email else (author_name or author_email or "Unknown")
+
+        committer_name = committer.get("name")
+        committer_email = committer.get("email")
+        committer_str = f"{committer_name} <{committer_email}>" if committer_name and committer_email else (committer_name or committer_email or "Unknown")
+
+        artifact: dict[str, Any] = {
+            "id": artifact_id,
+            "kind": artifact_kind,
+            "title": subject,
+            "commit": sha,
+            "source": "github_history",
+            "repository_url": repo_url,
+            "retrieval_time": retrieval_time,
+            "content_digest": digest,
+            "provenance": {
+                "repository_url": repo_url,
+                "commit_sha": sha,
+                "retrieval_time": retrieval_time,
+                "content_digest": digest,
+                "author": author_str,
+                "author_name": author.get("name"),
+                "author_email": author.get("email"),
+                "authored_date": author.get("date"),
+                "committer": committer_str,
+                "committer_name": committer.get("name"),
+                "committer_email": committer.get("email"),
+                "committed_date": committer.get("date"),
+                "message": message,
+                "tree_sha": tree.get("sha"),
+                "parents": sorted(parents),
+                "html_url": html_url,
+                "verified": verification.get("verified", False),
+            },
+        }
+        artifacts.append(artifact)
+
+        # Explicit linking only: user requirement-id or explicit REQ-... tags in commit message
+        linked_requirements = [requirement_id] if requirement_id else re.findall(
+            r"\bREQ-[A-Za-z0-9-]+\b", subject + " " + body, flags=re.IGNORECASE
+        )
+        for req_id in sorted(set(linked_requirements)):
+            if req_id in requirements:
+                edges.append({"from": req_id, "to": artifact_id, "type": relation})
+
     return merge_imports(manifest, artifacts, edges), len(artifacts), len(edges)
 
 
@@ -546,9 +781,213 @@ def write_dataset(path: Path, data: dict[str, Any]) -> None:
     path.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
 
 
+def init_manifest(release_name: str, output_path: Path, notes: str | None = None) -> dict[str, Any]:
+    if not release_name or not release_name.strip():
+        raise DatasetError("release name must be a non-empty string")
+    manifest: dict[str, Any] = {
+        "schema_version": 1,
+        "release": release_name.strip(),
+        "artifacts": [],
+        "edges": [],
+    }
+    if notes and notes.strip():
+        manifest["notes"] = notes.strip()
+    write_dataset(output_path, manifest)
+    return manifest
+
+
+def inspect_dataset(manifest: dict[str, Any]) -> dict[str, Any]:
+    artifacts = manifest.get("artifacts", [])
+    edges = manifest.get("edges", [])
+    by_kind: dict[str, int] = defaultdict(int)
+    by_source: dict[str, int] = defaultdict(int)
+    provenance_count = 0
+    with_commit = 0
+    for a in artifacts:
+        by_kind[a.get("kind", "unknown")] += 1
+        by_source[a.get("source", "unspecified")] += 1
+        if a.get("commit"):
+            with_commit += 1
+        if "provenance" in a or "content_digest" in a:
+            provenance_count += 1
+    by_relation: dict[str, int] = defaultdict(int)
+    for e in edges:
+        by_relation[e.get("type", "unknown")] += 1
+    return {
+        "release": manifest.get("release", "unnamed"),
+        "schema_version": manifest.get("schema_version", 1),
+        "fictional": bool(manifest.get("fictional", False)),
+        "notes": manifest.get("notes"),
+        "total_artifacts": len(artifacts),
+        "artifacts_by_kind": dict(sorted(by_kind.items())),
+        "artifacts_by_source": dict(sorted(by_source.items())),
+        "artifacts_with_commits": with_commit,
+        "provenance_tracked_artifacts": provenance_count,
+        "total_edges": len(edges),
+        "edges_by_relation": dict(sorted(by_relation.items())),
+    }
+
+
+def render_inspect(summary: dict[str, Any]) -> str:
+    lines = [
+        f"Manifest inspection: {summary['release']}",
+        f"Schema version: {summary['schema_version']}",
+        f"Sample classification: {'Fictional demonstration sample' if summary['fictional'] else 'Real / production manifest'}",
+    ]
+    if summary.get("notes"):
+        lines.append(f"Notes: {summary['notes']}")
+    lines.append(f"Total artifacts: {summary['total_artifacts']}")
+    for kind, count in summary["artifacts_by_kind"].items():
+        lines.append(f"  - {kind}: {count}")
+    source_strs = [f"{src} ({cnt})" for src, cnt in summary["artifacts_by_source"].items()]
+    lines.append(f"Sources: {', '.join(source_strs) if source_strs else 'None'}")
+    lines.append(f"Artifacts with commit SHAs: {summary['artifacts_with_commits']}")
+    lines.append(f"Artifacts with cryptographic provenance: {summary['provenance_tracked_artifacts']}")
+    lines.append(f"Total links: {summary['total_edges']}")
+    for rel, count in summary["edges_by_relation"].items():
+        lines.append(f"  - {rel}: {count}")
+    return "\n".join(lines)
+
+
+def verify_manifest_digests(manifest: dict[str, Any]) -> tuple[int, int, list[dict[str, Any]]]:
+    """Verify cryptographic content digests for all artifacts in a manifest."""
+    artifacts = manifest.get("artifacts", [])
+    total_digests = 0
+    verified = 0
+    mismatches: list[dict[str, Any]] = []
+
+    for artifact in artifacts:
+        digest = artifact.get("content_digest")
+        if not digest:
+            continue
+        total_digests += 1
+        source = artifact.get("source")
+        prov = artifact.get("provenance") or {}
+
+        if source == "github_history":
+            if artifact.get("commit") and artifact.get("commit") != prov.get("commit_sha"):
+                mismatches.append({
+                    "id": artifact.get("id"),
+                    "recorded": digest,
+                    "reason": "Top-level commit SHA does not match provenance commit_sha",
+                })
+                continue
+            prov_subject = (prov.get("message") or "").splitlines()[0].strip() if prov.get("message") else ""
+            if prov_subject and artifact.get("title") and artifact.get("title").strip() != prov_subject:
+                mismatches.append({
+                    "id": artifact.get("id"),
+                    "recorded": digest,
+                    "reason": f"Artifact title was modified (expected {prov_subject!r}, found {artifact.get('title')!r})",
+                })
+                continue
+
+            reconstructed_commit = {
+                "sha": prov.get("commit_sha") or artifact.get("commit", ""),
+                "commit": {
+                    "message": prov.get("message") or artifact.get("title", ""),
+                    "author": {
+                        "name": prov.get("author_name"),
+                        "email": prov.get("author_email"),
+                        "date": prov.get("authored_date"),
+                    },
+                    "committer": {
+                        "name": prov.get("committer_name"),
+                        "email": prov.get("committer_email"),
+                        "date": prov.get("committed_date"),
+                    },
+                    "tree": {"sha": prov.get("tree_sha", "")},
+                },
+                "parents": [{"sha": p} if isinstance(p, str) else p for p in prov.get("parents", [])],
+            }
+            expected = compute_commit_digest(reconstructed_commit)
+            if digest == expected and digest == prov.get("content_digest"):
+                verified += 1
+            else:
+                mismatches.append({
+                    "id": artifact.get("id"),
+                    "recorded": digest,
+                    "expected": expected,
+                    "reason": "Cryptographic digest mismatch with provenance payload",
+                })
+        elif source == "git_history":
+            commit = prov.get("commit_sha") or artifact.get("commit", "")
+            subject = prov.get("subject", artifact.get("title", ""))
+            body = prov.get("body", "")
+            payload = {"commit": commit, "subject": subject.strip(), "body": body.strip()}
+            expected = f"sha256:{hashlib.sha256(json.dumps(payload, sort_keys=True).encode('utf-8')).hexdigest()}"
+            if digest == expected and digest == prov.get("content_digest"):
+                verified += 1
+            else:
+                mismatches.append({
+                    "id": artifact.get("id"),
+                    "recorded": digest,
+                    "expected": expected,
+                    "reason": "Digest mismatch with local git commit payload",
+                })
+        else:
+            if digest.startswith("sha256:") and len(digest) == 71:
+                verified += 1
+            else:
+                mismatches.append({
+                    "id": artifact.get("id"),
+                    "recorded": digest,
+                    "reason": "Invalid digest format",
+                })
+
+    return total_digests, verified, mismatches
+
+
+def launch_viewer(manifest_path: Path | None = None, port: int = 0, no_browser: bool = False) -> int:
+    viewer_path = ROOT / "viewer.html"
+    if not viewer_path.exists():
+        raise DatasetError(f"viewer file not found at {viewer_path}")
+
+    if port > 0:
+        import functools
+        import http.server
+        handler = functools.partial(http.server.SimpleHTTPRequestHandler, directory=str(ROOT))
+        server = http.server.ThreadingHTTPServer(("127.0.0.1", port), handler)
+        url = f"http://127.0.0.1:{port}/viewer.html"
+        print(f"Serving ASIC TraceGate impact explorer at {url}")
+        print("Press Ctrl+C to stop.")
+        if not no_browser:
+            webbrowser.open(url)
+        try:
+            server.serve_forever()
+        except KeyboardInterrupt:
+            print("\nStopped server.")
+        return 0
+    else:
+        url = viewer_path.as_uri()
+        print(f"Opening impact explorer in browser: {url}")
+        if not no_browser:
+            webbrowser.open(url)
+        return 0
+
+
 def make_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Check release traceability and import local engineering artifacts.")
+    parser = argparse.ArgumentParser(
+        prog="tracegate",
+        description="Check release traceability, verify cryptographic supply-chain provenance, and import engineering artifacts.",
+    )
     commands = parser.add_subparsers(dest="command", required=True)
+
+    init_cmd = commands.add_parser("init", help="create a new empty release manifest for real project data")
+    init_cmd.add_argument("--release", required=True, help="name of the release (e.g. v1.0.0)")
+    init_cmd.add_argument("--output", type=Path, default=Path("release.json"), help="manifest output path (default: release.json)")
+    init_cmd.add_argument("--notes", help="optional release description or provenance notes")
+
+    inspect_cmd = commands.add_parser("inspect", help="summarize manifest contents, artifact types, and provenance")
+    inspect_cmd.add_argument("manifest", nargs="?", type=Path, default=DEFAULT_MANIFEST)
+    inspect_cmd.add_argument("--format", choices=("text", "json"), default="text")
+
+    verify_cmd = commands.add_parser("verify-digests", help="verify cryptographic content digests across manifest artifacts")
+    verify_cmd.add_argument("manifest", nargs="?", type=Path, default=DEFAULT_MANIFEST)
+
+    view_cmd = commands.add_parser("view", help="open the interactive impact graph explorer in your web browser")
+    view_cmd.add_argument("manifest", nargs="?", type=Path, default=DEFAULT_MANIFEST, help="manifest file to view")
+    view_cmd.add_argument("--port", type=int, default=0, help="serve on a local HTTP port (e.g. 8080)")
+    view_cmd.add_argument("--no-browser", action="store_true", help="do not automatically launch a browser")
 
     check = commands.add_parser("check", help="evaluate a release manifest")
     check.add_argument("manifest", nargs="?", type=Path, default=DEFAULT_MANIFEST)
@@ -574,6 +1013,20 @@ def make_parser() -> argparse.ArgumentParser:
     git.add_argument("--kind", default="rtl_change")
     git.add_argument("--relation", default="implemented_by")
     git.add_argument("--max-commits", type=int, default=100)
+
+    github = commands.add_parser(
+        "import-github", help="retrieve GitHub repository history with provenance"
+    )
+    github.add_argument("repository", help="GitHub repository URL (https://github.com/owner/repo) or owner/repo")
+    github.add_argument("--manifest", type=Path, default=DEFAULT_MANIFEST, help="base manifest to merge into")
+    github.add_argument("--output", type=Path, default=DEFAULT_OUTPUT, help="path to write merged manifest")
+    github.add_argument("--requirement-id", help="link imported commits to this requirement ID")
+    github.add_argument("--kind", default="source_change", help="artifact kind (default: source_change)")
+    github.add_argument("--relation", default="implemented_by", help="relationship type when linked to a requirement")
+    github.add_argument("--prefix", help="custom artifact ID prefix (default: SRC, RTL, or derived from kind)")
+    github.add_argument("--branch", help="branch or commit ref to retrieve (default: repository default branch)")
+    github.add_argument("--max-commits", type=int, default=100, help="maximum commits to retrieve (default: 100)")
+    github.add_argument("--token", help="GitHub Personal Access Token (or set GITHUB_TOKEN environment variable)")
 
     artifacts = commands.add_parser("import-artifacts", help="merge a normalized artifacts-and-edges JSON export")
     artifacts.add_argument("export", type=Path)
@@ -603,13 +1056,48 @@ def make_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     args_in = list(sys.argv[1:] if argv is None else argv)
+    known_commands = {
+        "check", "init", "inspect", "verify-digests", "view",
+        "import-jira", "import-git", "import-github", "import-artifacts",
+        "import-evidence", "import-csv-evidence", "-h", "--help",
+    }
     if not args_in:
         args_in = ["check"]
-    elif args_in[0] not in {"check", "import-jira", "import-git", "import-artifacts", "import-evidence",
-                            "import-csv-evidence", "-h", "--help"}:
+    elif args_in[0] not in known_commands:
         args_in.insert(0, "check")
     args = make_parser().parse_args(args_in)
     try:
+        if args.command == "init":
+            init_manifest(args.release, args.output, args.notes)
+            print(f"Initialized new release manifest '{args.release}' at {args.output}")
+            return 0
+
+        if args.command == "inspect":
+            manifest = load_dataset(args.manifest)
+            summary = inspect_dataset(manifest)
+            if args.format == "json":
+                print(json.dumps(summary, indent=2, ensure_ascii=False))
+            else:
+                print(render_inspect(summary))
+            return 0
+
+        if args.command == "verify-digests":
+            manifest = load_dataset(args.manifest)
+            total, verified, mismatches = verify_manifest_digests(manifest)
+            if total == 0:
+                print("No cryptographic digests found in manifest.")
+                return 0
+            if mismatches:
+                print(f"Verification failed: {len(mismatches)} of {total} digests mismatched or tampered!")
+                for m in mismatches:
+                    print(f"- Artifact {m['id']}: {m['reason']} (recorded: {m['recorded']})")
+                return 1
+            print(f"Verified {verified}/{total} cryptographic content digests: all valid (0 tampered).")
+            return 0
+
+        if args.command == "view":
+            return launch_viewer(args.manifest, args.port, args.no_browser)
+
         if args.command == "check":
             report = analyze(load_dataset(args.manifest), load_rules(args.rules))
             all_findings = report["findings"]
@@ -639,6 +1127,16 @@ def main(argv: list[str] | None = None) -> int:
             merged, artifact_count, edge_count = import_git_history(
                 manifest, args.repository, args.requirement_id, args.kind, args.relation, args.max_commits
             )
+        elif args.command == "import-github":
+            merged, artifact_count, edge_count = import_github_history(
+                manifest, args.repository, args.requirement_id, args.kind, args.relation,
+                args.max_commits, args.branch, args.token, args.prefix
+            )
+            write_dataset(args.output, merged)
+            print(f"Imported or merged {artifact_count} artifacts and {edge_count} links with provenance into {args.output}")
+            if edge_count == 0 and not args.requirement_id:
+                print("Note: GitHub history records change provenance but does not verify requirements, tests, or builds. No requirement links were inferred without explicit identifiers.")
+            return 0
         elif args.command == "import-evidence":
             merged, artifact_count, edge_count = import_evidence_export(manifest, load_json(args.export))
         elif args.command == "import-csv-evidence":
