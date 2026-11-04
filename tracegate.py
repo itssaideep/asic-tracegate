@@ -85,6 +85,7 @@ def analyze(data: dict[str, Any]) -> dict[str, Any]:
     trace_present = 0
     evidence_total = 0
     evidence_complete = 0
+    valid_evidence_ids: set[str] = set()
     requirements = [a for a in data["artifacts"] if a["kind"] == "requirement"]
     impact: dict[str, list[str]] = {}
 
@@ -126,13 +127,22 @@ def analyze(data: dict[str, Any]) -> dict[str, Any]:
                 impacted_baselines.add(baseline["id"])
         impact[req_id] = sorted((related_ids - {req_id}) | impacted_baselines)
 
-        evidence_total += 3
+        evidence_total += 4
         docs = [artifacts[aid] for aid in linked_by_relation["documented_by"]]
         docs_current = [doc for doc in docs if doc.get("requirement_revision") == req.get("revision")]
         if docs_current:
             evidence_complete += 1
+            valid_evidence_ids.update(doc["id"] for doc in docs_current)
         else:
             add("DOC_REVISION_STALE", req_id, "No linked design specification matches the current requirement revision.")
+
+        models = [artifacts[aid] for aid in linked_by_relation["modeled_by"]]
+        models_current = [model for model in models if model.get("requirement_revision") == req.get("revision")]
+        if models_current:
+            evidence_complete += 1
+            valid_evidence_ids.update(model["id"] for model in models_current)
+        else:
+            add("MODEL_REVISION_STALE", req_id, "No linked reference model matches the current requirement revision.")
 
         valid_verification = []
         verification_mismatches = []
@@ -143,6 +153,7 @@ def analyze(data: dict[str, Any]) -> dict[str, Any]:
                 verification = artifacts[verification_id]
                 if verification["kind"] == "verification" and verification.get("status") == "PASS" and verification.get("rtl_commit") == rtl.get("commit"):
                     valid_verification.append(verification_id)
+                    valid_evidence_ids.add(verification_id)
                 elif verification["kind"] == "verification":
                     verification_mismatches.append(verification_id)
                     add("VERIFICATION_RTL_MISMATCH", verification_id, f"Verification evidence does not match current RTL commit for {rtl_id}.")
@@ -150,6 +161,7 @@ def analyze(data: dict[str, Any]) -> dict[str, Any]:
                 build = artifacts[build_id]
                 if build["kind"] == "fpga_build" and build.get("status") == "PASS" and build.get("rtl_commit") == rtl.get("commit"):
                     valid_builds.append(build_id)
+                    valid_evidence_ids.add(build_id)
                 elif build["kind"] == "fpga_build":
                     add("FPGA_BUILD_RTL_MISMATCH", build_id, f"FPGA build does not match current RTL commit for {rtl_id}.")
 
@@ -168,18 +180,15 @@ def analyze(data: dict[str, Any]) -> dict[str, Any]:
     for claim in claims:
         support_ids = claim.get("evidence_ids", [])
         supported = bool(support_ids) and all(
-            evidence_id in artifacts and artifacts[evidence_id]["kind"] in ACCEPTABLE_CLAIM_EVIDENCE
+            evidence_id in artifacts
+            and artifacts[evidence_id]["kind"] in ACCEPTABLE_CLAIM_EVIDENCE
+            and evidence_id in valid_evidence_ids
             for evidence_id in support_ids
         )
         if not supported:
             unsupported_claims.append(claim["id"])
-            add("CLAIM_UNSUPPORTED", claim["id"], "Claim has no linked evidence of an accepted evidence type.")
+            add("CLAIM_UNSUPPORTED", claim["id"], "Claim has no linked current evidence of an accepted type.")
 
-    predicted = {finding["code"] for finding in findings}
-    expected = set(data.get("expected_warning_codes", []))
-    true_positive = len(predicted & expected)
-    precision = true_positive / len(predicted) if predicted else (1.0 if not expected else 0.0)
-    recall = true_positive / len(expected) if expected else (1.0 if not predicted else 0.0)
     return {
         "release": data.get("release", "unnamed-release"),
         "requirements": [r["id"] for r in requirements],
@@ -191,8 +200,6 @@ def analyze(data: dict[str, Any]) -> dict[str, Any]:
         "evidence_items_expected": evidence_total,
         "unsupported_claim_rate": len(unsupported_claims) / len(claims) if claims else 0.0,
         "unsupported_claims": unsupported_claims,
-        "warning_precision": precision,
-        "warning_recall": recall,
         "findings": findings,
         "change_impact": impact,
         "gate": "BLOCK" if findings else "PASS",
@@ -208,8 +215,6 @@ def render_report(report: dict[str, Any]) -> str:
         f"Evidence completeness: {report['evidence_completeness']:.0%} "
         f"({report['evidence_items_current']}/{report['evidence_items_expected']} current evidence checks)",
         f"Unsupported-claim rate: {report['unsupported_claim_rate']:.0%}",
-        f"Warning precision / recall vs fixture labels: "
-        f"{report['warning_precision']:.0%} / {report['warning_recall']:.0%}",
         "",
         "Findings:",
     ]
